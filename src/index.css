@@ -130,3 +130,82 @@
     font-size: 0.85rem;
   }
 }
+
+/* Player wrapper: use the small dynamic viewport height (`100svh`) so
+   when Chrome's URL bar reappears on Android our overlay shrinks to
+   stay fully visible — no controls hidden behind chrome. Falls back
+   to 100vh on older browsers. Safe-area padding keeps the close button
+   and the bottom controls clear of the status bar / nav gestures. */
+.player-wrapper {
+  height: 100vh;
+  height: 100svh;
+  padding-top: max(0.25rem, env(safe-area-inset-top));
+  padding-right: max(0.25rem, env(safe-area-inset-right));
+  padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+  padding-left: max(0.25rem, env(safe-area-inset-left));
+}
+@media (min-width: 640px) {
+  .player-wrapper {
+    padding: 1.5rem;
+  }
+}
+
+/* Player stage: the actual video container.
+   Default (touch-first) = fills the wrapper completely so phones and
+   tablets get true fullscreen video. Desktop / mouse = override to a
+   centered 16:9 box with max width. We detect "desktop" via the
+   `(hover: hover) and (pointer: fine)` media query because Tailwind's
+   `sm:` breakpoint is width-based and a phone in landscape exceeds it,
+   misclassifying touch devices as desktop. */
+.player-stage {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .player-stage {
+    width: 100%;
+    height: auto;
+    max-width: 72rem; /* tailwind 6xl */
+    aspect-ratio: 16 / 9;
+    border-radius: 0.75rem; /* tailwind rounded-xl */
+  }
+}
+
+/* Mobile-only fixed close button. Hidden by default; revealed only on
+   touch devices (phones, tablets) via the `(hover: none) and
+   (pointer: coarse)` media query — that's the standard way to detect
+   "touch as primary input". Breakpoint-based hiding (sm:hidden) misfires
+   because a phone in landscape easily passes the sm breakpoint. */
+.player-close-fixed {
+  display: none;
+}
+@media (hover: none) and (pointer: coarse) {
+  .player-close-fixed {
+    position: fixed;
+    top: max(0.5rem, env(safe-area-inset-top));
+    right: max(0.5rem, env(safe-area-inset-right));
+    z-index: 60;
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 9999px;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(4px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Bottom controls bar — only one safe-area top-up (the wrapper already
+   inset-pads the bottom, so we don't double-count). On touch devices
+   give a slightly bigger comfortable bottom padding to avoid the
+   gesture-nav strip. */
+@media (hover: none) and (pointer: coarse) {
+  .player-controls-bar {
+    padding-bottom: 1rem;
+  }
+}

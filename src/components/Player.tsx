@@ -567,8 +567,11 @@ export default function Player() {
 
   return (
     <div
-      // Tighter padding on mobile so the player gets the full viewport.
-      className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-1 sm:p-6"
+      // `player-wrapper` opts into the dynamic-viewport-height + safe-area
+      // padding rules in index.css so the player adapts when Chrome's URL
+      // bar slides in/out and never sits under the system gesture / status
+      // bars.
+      className="player-wrapper fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-1 sm:p-6"
       onKeyDown={onKeyDown}
       onMouseMove={resetHideTimer}
       // Touch support: tapping the screen reveals the controls (mobile has
@@ -578,16 +581,19 @@ export default function Player() {
       onClick={resetHideTimer}
       tabIndex={0}
     >
-      {/* Always-visible close button (top-right corner of the entire
-          fullscreen overlay). On desktop it overlaps the topbar's close,
-          but on mobile it's the only one guaranteed reachable when the
-          autohide timer kicks in. */}
+      {/* Always-visible close button on TOUCH devices (phones / tablets).
+          Positioned with safe-area insets so neither the Android status
+          bar nor a notch covers it. The visibility itself is gated by a
+          `(hover: none) and (pointer: coarse)` media query in index.css —
+          using Tailwind's `sm:hidden` doesn't work because phones in
+          landscape easily exceed the sm breakpoint (640px) and the button
+          would disappear right when it's most needed. */}
       <button
         onClick={(e) => {
           e.stopPropagation();
           stop();
         }}
-        className="fixed top-2 right-2 z-[60] w-10 h-10 rounded-full bg-black/70 hover:bg-black/90 backdrop-blur border border-white/15 flex items-center justify-center text-white shadow-lg sm:hidden"
+        className="player-close-fixed"
         aria-label={t("player.close")}
       >
         <IconClose />
@@ -595,7 +601,7 @@ export default function Player() {
 
       <div
         ref={containerRef}
-        className={`relative w-full max-w-6xl aspect-video bg-black rounded-none sm:rounded-xl overflow-hidden shadow-2xl ${
+        className={`player-stage relative bg-black overflow-hidden shadow-2xl ${
           !controlsVisible ? "cursor-none" : ""
         }`}
         onMouseMove={resetHideTimer}
@@ -795,7 +801,7 @@ export default function Player() {
         )}
 
         <div
-          className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent px-4 pt-10 pb-3 transition-opacity duration-300 ${
+          className={`player-controls-bar absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent px-4 pt-10 pb-3 transition-opacity duration-300 ${
             controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
         >
