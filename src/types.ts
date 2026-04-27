@@ -5,6 +5,10 @@ export interface M3USource {
   type: "m3u";
   name: string;
   url: string;
+  // Optional XMLTV URL for the EPG (programme guide). Auto-detected from
+  // the M3U header `url-tvg="..."` attribute when present, but the user can
+  // also set it manually in the source manager.
+  epgUrl?: string;
 }
 
 export interface XtreamSource {

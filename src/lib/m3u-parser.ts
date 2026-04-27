@@ -5,6 +5,9 @@ export interface ParsedM3U {
   live: LiveChannel[];
   movies: Movie[];
   series: SeriesItem[];
+  // XMLTV/EPG URL extracted from the `#EXTM3U url-tvg="..."` header line
+  // (some providers also use `x-tvg-url=` or `tvg-url=`).
+  epgUrl?: string;
 }
 
 const attrRegex = /([a-zA-Z0-9-]+)="([^"]*)"/g;
@@ -132,7 +135,22 @@ interface SeriesBuilder {
   logos: string[];
 }
 
+// Pull the EPG/XMLTV URL out of the playlist header line. Different providers
+// use different attribute names — we try the common ones in order.
+function extractEpgUrlFromHeader(content: string): string | undefined {
+  const firstLine = content.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  if (!firstLine.startsWith("#EXTM3U")) return undefined;
+  const attrs = parseAttrs(firstLine);
+  return (
+    attrs["url-tvg"] ||
+    attrs["x-tvg-url"] ||
+    attrs["tvg-url"] ||
+    undefined
+  );
+}
+
 export function parseM3U(content: string): ParsedM3U {
+  const epgUrl = extractEpgUrlFromHeader(content);
   const entries = parseEntries(content);
   const live: LiveChannel[] = [];
   const movies: Movie[] = [];
@@ -241,5 +259,5 @@ export function parseM3U(content: string): ParsedM3U {
     };
   });
 
-  return { live, movies, series };
+  return { live, movies, series, epgUrl };
 }

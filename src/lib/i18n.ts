@@ -138,6 +138,11 @@ const pt: Dict = {
   "source.myList": "Minha lista",
   "source.myServer": "Meu servidor",
   "source.confirmRemove": "Remover \"{name}\"?",
+  "source.edit": "Editar",
+  "source.optional": "opcional",
+  "source.epgUrl": "URL do EPG (XMLTV)",
+  "source.epgUrlHint":
+    "Endereço do XMLTV pra exibir o guia de programação. Detectado automaticamente do header url-tvg da playlist se ausente.",
 
   "series.watchedOn": "Assistindo",
   "series.noEpisodes": "Nenhum episódio disponível para esta série.",
@@ -283,6 +288,11 @@ const en: Dict = {
   "source.myList": "My list",
   "source.myServer": "My server",
   "source.confirmRemove": "Remove \"{name}\"?",
+  "source.edit": "Edit",
+  "source.optional": "optional",
+  "source.epgUrl": "EPG URL (XMLTV)",
+  "source.epgUrlHint":
+    "XMLTV address to display the programme guide. Auto-detected from the playlist's url-tvg header when not provided.",
 
   "series.watchedOn": "Now playing",
   "series.noEpisodes": "No episodes available for this series.",

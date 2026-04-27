@@ -29,6 +29,8 @@ import {
 } from "./lib/storage";
 import { parseM3U } from "./lib/m3u-parser";
 import { fetchText } from "./lib/http";
+import { parseXmltv, programsAround, type EpgIndex } from "./lib/xmltv-parser";
+import { loadEpg, saveEpg, isEpgFresh } from "./lib/epg-cache";
 import {
   loadXtreamLive,
   loadXtreamMovies,
@@ -69,6 +71,12 @@ interface AppState {
   // Live channel "recently watched": channelId -> last play timestamp.
   liveRecent: Record<string, number>;
 
+  // EPG (programme guide) data for the active source. Indexed by `tvg-id` →
+  // sorted list of programmes. Populated for M3U sources from XMLTV (the
+  // source's `epgUrl`); empty for Xtream sources because those use the
+  // `get_short_epg` API on demand instead.
+  epgIndex: EpgIndex;
+
   // Live queue: lets the Player navigate prev/next without going back to the menu.
   liveQueue: LiveChannel[];
   liveQueueIndex: number;
@@ -91,6 +99,7 @@ interface AppState {
   init: () => Promise<void>;
   addSource: (s: Source) => Promise<void>;
   removeSource: (id: string) => Promise<void>;
+  updateSource: (s: Source) => Promise<void>;
   setActiveSource: (id: string) => Promise<void>;
   loadContent: (opts?: { force?: boolean }) => Promise<void>;
   refreshContent: () => Promise<void>;
@@ -238,7 +247,16 @@ export function applySort<T extends { name: string; addedAt?: number; order?: nu
   return indexed.map((x) => x.item);
 }
 
-async function fetchFresh(source: Source) {
+interface FreshContent {
+  liveChannels: LiveChannel[];
+  movies: Movie[];
+  series: SeriesItem[];
+  // EPG/XMLTV URL auto-detected from the M3U `#EXTM3U url-tvg=...` header.
+  // Caller persists it onto the source if the user hasn't already set one.
+  detectedEpgUrl?: string;
+}
+
+async function fetchFresh(source: Source): Promise<FreshContent> {
   // Xtream-flavored M3U URLs (.../get.php?username=X&password=Y) carry the same
   // credentials the panel uses for its API. When detected, prefer the Xtream
   // API — it provides covers, plots, cast and ratings that bare M3U lacks.
@@ -257,8 +275,13 @@ async function fetchFresh(source: Source) {
 
   if (source.type === "m3u") {
     const text = await fetchText(source.url);
-    const { live, movies, series } = parseM3U(text);
-    return { liveChannels: live, movies, series };
+    const parsed = parseM3U(text);
+    return {
+      liveChannels: parsed.live,
+      movies: parsed.movies,
+      series: parsed.series,
+      detectedEpgUrl: parsed.epgUrl,
+    };
   }
 
   // Direct Xtream source whose API failed: re-throw with empty result so the
@@ -312,6 +335,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   favorites: [],
   watchProgress: {},
   liveRecent: {},
+  epgIndex: {},
 
   liveQueue: [],
   liveQueueIndex: -1,
@@ -359,6 +383,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().setActiveSource(source.id);
   },
 
+  async updateSource(updated) {
+    const sources = get().sources.map((s) => (s.id === updated.id ? updated : s));
+    await saveSources(sources);
+    set({ sources });
+    // If the updated source is the active one, refresh its catalog & EPG —
+    // the URLs may have changed.
+    if (get().activeSourceId === updated.id) {
+      // Bust the catalog cache so a fresh fetch happens (URL might have changed).
+      await clearCache(updated.id).catch(() => {});
+      // EPG cache is keyed off the EPG URL inside the payload, so it will
+      // self-invalidate; no explicit clear needed.
+      await get().loadContent({ force: true });
+    }
+  },
+
   async removeSource(id) {
     const sources = get().sources.filter((s) => s.id !== id);
     await saveSources(sources);
@@ -385,6 +424,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       movies: [],
       series: [],
       cacheAt: null,
+      epgIndex: {},
     });
     await get().loadContent();
   },
@@ -418,14 +458,32 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       const fresh = await fetchFresh(source);
+      const { detectedEpgUrl, ...catalog } = fresh;
       set({
-        ...fresh,
+        ...catalog,
         loading: false,
         refreshing: false,
         error: null,
         cacheAt: Date.now(),
       });
-      await saveCache(source.id, fresh);
+      await saveCache(source.id, catalog);
+
+      // M3U source: persist auto-detected EPG URL onto the source so we
+      // don't have to re-detect on every catalog refresh, but never
+      // overwrite a manually-set epgUrl.
+      if (source.type === "m3u" && detectedEpgUrl && !source.epgUrl) {
+        const updatedSource = { ...source, epgUrl: detectedEpgUrl };
+        const sources = get().sources.map((s) =>
+          s.id === source.id ? updatedSource : s
+        );
+        await saveSources(sources);
+        set({ sources });
+      }
+
+      // Load EPG (fire-and-forget, doesn't block UI). Refreshes from the
+      // network if the cache is stale; otherwise just hydrates the in-memory
+      // index so the player can show "now playing".
+      void hydrateEpgFor(source.id).catch(() => {});
     } catch (e) {
       set({
         loading: false,
@@ -721,10 +779,59 @@ function extractXtreamVodId(m: Movie): string | null {
 }
 
 async function loadEpgForLive(c: LiveChannel): Promise<EpgProgram[]> {
-  const streamId = extractXtreamStreamId(c);
-  if (!streamId) return [];
   const state = useAppStore.getState();
   const source = state.sources.find((s) => s.id === state.activeSourceId);
-  if (!source || source.type !== "xtream") return [];
-  return await loadXtreamShortEpg(source, streamId, 2);
+  if (!source) return [];
+
+  // Xtream sources: per-channel EPG via the `get_short_epg` API.
+  const streamId = extractXtreamStreamId(c);
+  if (streamId && source.type === "xtream") {
+    return await loadXtreamShortEpg(source, streamId, 2);
+  }
+
+  // M3U sources: look up the channel in the in-memory XMLTV index by tvg-id.
+  // The index is populated by `hydrateEpgFor` when the catalog loads.
+  if (source.type === "m3u") {
+    return programsAround(state.epgIndex, c.epgId, Date.now(), 1);
+  }
+
+  return [];
+}
+
+// Load (or refresh) the EPG/XMLTV index for the given source. Reads cached
+// data first to populate the in-memory index immediately, then re-fetches
+// from the network if the cache is stale or absent.
+async function hydrateEpgFor(sourceId: string): Promise<void> {
+  const state = useAppStore.getState();
+  const source = state.sources.find((s) => s.id === sourceId);
+  if (!source) return;
+
+  // Only M3U sources need a precomputed index. Xtream uses its API per call.
+  if (source.type !== "m3u") {
+    if (Object.keys(state.epgIndex).length > 0) {
+      useAppStore.setState({ epgIndex: {} });
+    }
+    return;
+  }
+
+  // 1. Hydrate from cache so the UI gets EPG immediately.
+  const cached = await loadEpg(source.id);
+  if (cached && cached.url === source.epgUrl) {
+    useAppStore.setState({ epgIndex: cached.index });
+    if (isEpgFresh(cached)) return; // still fresh, skip network
+  }
+
+  // 2. No EPG URL configured → nothing more we can do.
+  if (!source.epgUrl) return;
+
+  // 3. Fetch & parse XMLTV. This is the expensive step (5–50 MB download +
+  // parse), but it runs in the background so the UI is never blocked.
+  try {
+    const xml = await fetchText(source.epgUrl);
+    const index = parseXmltv(xml);
+    useAppStore.setState({ epgIndex: index });
+    await saveEpg(source.id, source.epgUrl, index);
+  } catch (e) {
+    console.warn("[epg] failed to fetch/parse XMLTV:", e);
+  }
 }
