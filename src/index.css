@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full w-full m-0 p-0 text-slate-100 font-sans antialiased overflow-hidden;
+  }
+
+  body {
+    background-color: #0b0d12;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a3040;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a4255;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-accent hover:bg-accent-hover text-white;
+  }
+  .btn-ghost {
+    @apply btn bg-white/5 hover:bg-white/10 text-slate-200 backdrop-blur;
+  }
+  .input {
+    @apply w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-accent;
+  }
+  .card {
+    @apply bg-bg-800 border border-white/5 rounded-xl p-4;
+  }
+
+  .bg-gradient {
+    background:
+      radial-gradient(ellipse at 25% 10%, rgba(56, 189, 248, 0.16), transparent 55%),
+      radial-gradient(ellipse at 75% 85%, rgba(251, 191, 36, 0.10), transparent 60%),
+      radial-gradient(ellipse at 50% 50%, rgba(14, 165, 233, 0.06), transparent 70%),
+      linear-gradient(180deg, #050a16 0%, #030812 60%, #020610 100%);
+  }
+
+  .bg-lumina-art {
+    background-image: url("/lumina-bg.png");
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+
+  .theme-modern .bg-gradient {
+    background:
+      radial-gradient(ellipse at 10% 0%, rgba(14, 165, 233, 0.22), transparent 55%),
+      radial-gradient(ellipse at 90% 30%, rgba(34, 211, 238, 0.15), transparent 60%),
+      radial-gradient(ellipse at 50% 100%, rgba(59, 130, 246, 0.12), transparent 60%),
+      linear-gradient(180deg, #06070d 0%, #050914 60%, #040811 100%);
+  }
+}
+
+.theme-modern {
+  --accent-color: #0ea5e9;
+  --accent-hover: #38bdf8;
+}
+.theme-modern .bg-accent { background-color: var(--accent-color) !important; }
+.theme-modern .hover\:bg-accent-hover:hover { background-color: var(--accent-hover) !important; }
+.theme-modern .text-accent { color: var(--accent-color) !important; }
+.theme-modern .ring-accent { --tw-ring-color: var(--accent-color) !important; }
+.theme-modern .border-accent { border-color: var(--accent-color) !important; }
+.theme-modern .focus\:ring-accent:focus { --tw-ring-color: var(--accent-color) !important; }
+
+.theme-modern .rounded-xl { border-radius: 1.25rem; }
+.theme-modern .rounded-2xl { border-radius: 1.5rem; }
+.theme-modern .rounded-lg { border-radius: 0.75rem; }
+
+.theme-modern svg {
+  stroke-width: 1.75;
+}
+.theme-modern .card {
+  box-shadow: 0 8px 32px -12px rgba(14, 165, 233, 0.15);
+}
+
+.perspective {
+  perspective: 1000px;
+}
