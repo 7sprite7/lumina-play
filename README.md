@@ -188,7 +188,46 @@ server {
 }
 ```
 
-### 4. Streaming format support on web
+### 4. PWA (installable on Android/iOS/desktop)
+
+The web build is a **Progressive Web App**. After deploying with HTTPS, users
+visiting the site can install it as a standalone "app" on their device
+(Android home screen, iOS Add to Home Screen, Chromium / Edge on desktop).
+
+What this gives you:
+- Standalone window without the browser chrome — looks like a native app
+- Custom icon on the home screen / app drawer
+- Splash screen on launch (using the manifest's `theme_color` /
+  `background_color` and the 512×512 icon)
+- App shell cached by a service worker — UI loads even on flaky connections.
+  IPTV streams and the catalog API are **never** cached (always live).
+
+**Requirements for install to work:**
+- Site must be served over **HTTPS** (Let's Encrypt is fine)
+- The build output (`dist/`) must include `manifest.webmanifest`, `sw.js`,
+  and the icons under `pwa-*.png` — those are generated automatically by
+  `npm run build:web`.
+
+**How users install:**
+- **Android (Chrome / Edge / Samsung Internet):** they'll see an "Install
+  app" prompt automatically, or via the browser menu → "Install app" /
+  "Add to Home screen".
+- **iOS (Safari only):** Share button → "Add to Home Screen".
+- **Desktop (Chrome / Edge / Brave / Arc):** install icon in the address bar.
+
+**Why the SW doesn't cache streams or the catalog:** caching `.m3u8` /`.ts` /
+MP4 / MKV would balloon the user's storage with stale media; caching the
+Xtream API responses would risk showing yesterday's catalog and breaking
+EPG. The catalog already has its own purpose-built cache layer
+(IndexedDB on web, 12 h TTL — see `src/lib/cache.ts`). The SW only
+fingerprints the SPA shell (`index.html` + `assets/*.js,css,png,svg`).
+
+**Updating after a redeploy:** `vite-plugin-pwa` is in `autoUpdate` mode, so
+the next time the user opens the PWA the new SW takes over silently
+(usually after a refresh). If you want to force-update during testing,
+just clear the site data in browser settings.
+
+### 5. Streaming format support on web
 
 Live IPTV streams typically come in three transport types:
 
