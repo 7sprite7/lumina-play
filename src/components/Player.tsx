@@ -567,14 +567,35 @@ export default function Player() {
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-6"
+      // Tighter padding on mobile so the player gets the full viewport.
+      className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-1 sm:p-6"
       onKeyDown={onKeyDown}
       onMouseMove={resetHideTimer}
+      // Touch support: tapping the screen reveals the controls (mobile has
+      // no mousemove). Without this, autohide leaves the user unable to
+      // reach the close button on a phone.
+      onTouchStart={resetHideTimer}
+      onClick={resetHideTimer}
       tabIndex={0}
     >
+      {/* Always-visible close button (top-right corner of the entire
+          fullscreen overlay). On desktop it overlaps the topbar's close,
+          but on mobile it's the only one guaranteed reachable when the
+          autohide timer kicks in. */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          stop();
+        }}
+        className="fixed top-2 right-2 z-[60] w-10 h-10 rounded-full bg-black/70 hover:bg-black/90 backdrop-blur border border-white/15 flex items-center justify-center text-white shadow-lg sm:hidden"
+        aria-label={t("player.close")}
+      >
+        <IconClose />
+      </button>
+
       <div
         ref={containerRef}
-        className={`relative w-full max-w-6xl aspect-video bg-black rounded-xl overflow-hidden shadow-2xl ${
+        className={`relative w-full max-w-6xl aspect-video bg-black rounded-none sm:rounded-xl overflow-hidden shadow-2xl ${
           !controlsVisible ? "cursor-none" : ""
         }`}
         onMouseMove={resetHideTimer}

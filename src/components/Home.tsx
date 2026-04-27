@@ -56,7 +56,7 @@ export default function Home() {
   );
 
   return (
-    <div className="flex-1 relative flex items-center justify-center p-6 overflow-hidden">
+    <div className="flex-1 relative flex items-center justify-center p-3 sm:p-6 overflow-hidden">
       <div
         className="absolute inset-0 bg-lumina-art opacity-60 pointer-events-none"
         aria-hidden
@@ -66,7 +66,14 @@ export default function Home() {
         aria-hidden
       />
 
-      <div className="relative w-full max-w-5xl flex flex-wrap items-center justify-center gap-6">
+      {/* Layout strategy:
+          - Always 3 columns (so on landscape mobile the 3 home cards stay
+            on one row instead of wrapping).
+          - Card height shrinks with viewport: ~70vh max on phones,
+            fixed on tablet+.
+          - All cards proportional via aspect ratio so they don't overflow
+            on short landscape mobile screens. */}
+      <div className="relative w-full max-w-5xl grid grid-cols-3 gap-2 sm:gap-4 md:gap-6">
         {cards.map((c) => {
           const Icon = c.icon;
           return (
@@ -74,7 +81,7 @@ export default function Home() {
               key={c.id}
               onClick={() => !c.disabled && c.action()}
               disabled={c.disabled}
-              className={`group relative w-56 h-72 md:w-64 md:h-80 rounded-2xl overflow-hidden transition-all duration-300 ease-out ring-offset-2 ring-offset-bg-900 ${
+              className={`group relative aspect-[3/4] max-h-[70vh] sm:aspect-auto sm:h-72 md:h-80 rounded-xl sm:rounded-2xl overflow-hidden transition-all duration-300 ease-out ring-offset-2 ring-offset-bg-900 ${
                 c.disabled
                   ? "opacity-50 cursor-not-allowed"
                   : "hover:scale-[1.04] hover:ring-2 hover:ring-accent hover:shadow-[0_25px_60px_-15px] hover:shadow-accent/40"
@@ -84,21 +91,23 @@ export default function Home() {
               <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
 
               <div className="absolute inset-0 flex flex-col items-center justify-center text-white/85 transition-transform duration-300 group-hover:scale-110">
-                <Icon className="w-20 h-20 md:w-24 md:h-24 drop-shadow-lg" />
+                <Icon className="w-10 h-10 sm:w-20 sm:h-20 md:w-24 md:h-24 drop-shadow-lg" />
               </div>
 
               {!c.disabled && (
-                <div className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-black/60 text-xs font-semibold tabular-nums">
+                <div className="absolute top-1.5 right-1.5 sm:top-3 sm:right-3 px-1.5 py-0.5 sm:px-2 rounded-full bg-black/60 text-[10px] sm:text-xs font-semibold tabular-nums">
                   {c.badge}
                 </div>
               )}
 
-              <div className="absolute bottom-0 left-0 right-0 p-4 text-center">
-                <div className="font-bold uppercase tracking-wider text-sm md:text-base drop-shadow">
+              <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-4 text-center">
+                <div className="font-bold uppercase tracking-wider text-[11px] sm:text-sm md:text-base drop-shadow">
                   {c.label}
                 </div>
                 {c.disabled && (
-                  <div className="text-[10px] text-slate-300 mt-1">{t("home.noContent")}</div>
+                  <div className="text-[9px] sm:text-[10px] text-slate-300 mt-1">
+                    {t("home.noContent")}
+                  </div>
                 )}
               </div>
             </button>

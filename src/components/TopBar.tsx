@@ -64,7 +64,11 @@ export default function TopBar() {
   const canGoBack = view !== "home";
 
   return (
-    <header className="h-16 px-6 flex items-center gap-4 bg-gradient-to-b from-black/40 to-transparent backdrop-blur-sm relative z-10">
+    // Tighter on short / narrow viewports (mobile landscape ≈ 360px tall):
+    // smaller logo, smaller buttons, no date row. The `topbar-compact` CSS
+    // class below activates on `(max-height: 500px)` to claw back vertical
+    // space for the actual content.
+    <header className="topbar-compact h-16 px-3 sm:px-6 gap-2 sm:gap-4 flex items-center bg-gradient-to-b from-black/40 to-transparent backdrop-blur-sm relative z-10">
       {canGoBack ? (
         <button
           onClick={goBack}
@@ -75,25 +79,27 @@ export default function TopBar() {
           <span className="hidden sm:inline">{t("app.back")}</span>
         </button>
       ) : (
-        <div className="flex items-center gap-2.5 font-bold tracking-tight">
+        <div className="flex items-center gap-2 sm:gap-2.5 font-bold tracking-tight">
           <img
             src="/lumina-logo.png"
             alt=""
-            className="w-8 h-8 object-contain"
+            className="w-7 h-7 sm:w-8 sm:h-8 object-contain"
             onError={(e) => ((e.currentTarget.style.display = "none"))}
           />
-          <span className="text-lg">
+          <span className="text-base sm:text-lg">
             <span className="text-sky-300">LÚMINA</span>
-            <span className="text-amber-300 ml-1.5">PLAY</span>
+            <span className="text-amber-300 ml-1 sm:ml-1.5">PLAY</span>
           </span>
         </div>
       )}
 
       <div className="flex-1" />
 
-      <div className="text-center leading-tight">
-        <div className="font-semibold tabular-nums">{time}</div>
-        <div className="text-[11px] text-slate-400 tabular-nums">{date}</div>
+      <div className="text-center leading-tight topbar-clock">
+        <div className="font-semibold tabular-nums text-sm sm:text-base">{time}</div>
+        <div className="text-[11px] text-slate-400 tabular-nums topbar-date">
+          {date}
+        </div>
       </div>
 
       <div className="flex-1" />

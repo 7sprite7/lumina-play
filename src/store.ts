@@ -374,6 +374,33 @@ export const useAppStore = create<AppState>((set, get) => ({
     } else if (sources.length === 0) {
       set({ view: "settings" });
     }
+
+    // Auto-refresh every 12h. The catalog cache TTL is also 12h, so this
+    // matches: when the timer fires, `refreshContent` busts the cache and
+    // pulls a fresh copy from the provider. Skip if no active source or
+    // a refresh is already in flight.
+    if (typeof window !== "undefined") {
+      const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+      window.setInterval(() => {
+        const s = get();
+        if (!s.activeSourceId) return;
+        if (s.loading || s.refreshing) return;
+        if (s.playback) return; // don't tug the rug while user is watching
+        s.refreshContent().catch(() => {});
+      }, TWELVE_HOURS);
+
+      // Also refresh on tab/focus return when cache is stale (covers laptops
+      // that were sleeping or phones that backgrounded the app for hours).
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") return;
+        const s = get();
+        if (!s.activeSourceId || s.loading || s.refreshing || s.playback) return;
+        if (!s.cacheAt) return;
+        if (Date.now() - s.cacheAt > TWELVE_HOURS) {
+          s.refreshContent().catch(() => {});
+        }
+      });
+    }
   },
 
   async addSource(source) {

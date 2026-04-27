@@ -95,3 +95,38 @@
 .perspective {
   perspective: 1000px;
 }
+
+/* "Rotate phone" animation for the OrientationLock prompt — tilts the
+   phone icon -90° ↔ 0° in a loop so the cue is unambiguous. */
+@keyframes spin-rotate {
+  0%, 100% { transform: rotate(-90deg); }
+  50% { transform: rotate(0deg); }
+}
+.animate-spin-rotate {
+  animation: spin-rotate 2.4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+/* Mobile-landscape compact top bar: triggers when viewport height ≤500px
+   (typical for phones held sideways). Drops the date row, shrinks the
+   logo, tightens button padding — frees ~30px vertical for content. */
+@media (max-height: 500px) {
+  .topbar-compact {
+    height: 2.75rem;
+  }
+  .topbar-compact .topbar-date {
+    display: none;
+  }
+  .topbar-compact button,
+  .topbar-compact .btn-ghost {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+  .topbar-compact img {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+  .topbar-compact .topbar-clock {
+    font-size: 0.85rem;
+  }
+}

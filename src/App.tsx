@@ -9,6 +9,7 @@ import SourceManager from "./components/SourceManager";
 import Preferences from "./components/Preferences";
 import WelcomePinDialog from "./components/WelcomePinDialog";
 import Player from "./components/Player";
+import OrientationLock from "./components/OrientationLock";
 import { useT } from "./lib/i18n";
 
 export default function App() {
@@ -59,6 +60,10 @@ export default function App() {
 
       {showWelcomePin && <WelcomePinDialog />}
       {playback && <Player />}
+
+      {/* Mobile UX: covers the UI with a "rotate to landscape" prompt while
+          the device is held in portrait. Auto-dismisses on rotation. */}
+      <OrientationLock />
     </div>
   );
 }
