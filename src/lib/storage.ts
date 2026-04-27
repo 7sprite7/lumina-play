@@ -1,7 +1,11 @@
-import { LazyStore } from "@tauri-apps/plugin-store";
 import type { AppSettings, Source, WatchProgress } from "../types";
+import { createKV } from "./kv";
 
-const store = new LazyStore("iptv-player.json");
+// Single store for all the small typed-config blobs (sources list, active
+// source id, settings, favourites, watch progress, live recently-watched).
+// Backed by `iptv-player.json` on Tauri and by `lumina-play:*` keys in
+// localStorage on the web build.
+const store = createKV("iptv-player.json", "lumina-play");
 
 const SOURCES_KEY = "sources";
 const ACTIVE_SOURCE_KEY = "active_source_id";
@@ -27,7 +31,6 @@ export async function loadSources(): Promise<Source[]> {
 
 export async function saveSources(sources: Source[]): Promise<void> {
   await store.set(SOURCES_KEY, sources);
-  await store.save();
 }
 
 export async function loadActiveSourceId(): Promise<string | null> {
@@ -37,7 +40,6 @@ export async function loadActiveSourceId(): Promise<string | null> {
 export async function saveActiveSourceId(id: string | null): Promise<void> {
   if (id === null) await store.delete(ACTIVE_SOURCE_KEY);
   else await store.set(ACTIVE_SOURCE_KEY, id);
-  await store.save();
 }
 
 export async function loadSettings(): Promise<AppSettings> {
@@ -47,7 +49,6 @@ export async function loadSettings(): Promise<AppSettings> {
 
 export async function saveSettings(settings: AppSettings): Promise<void> {
   await store.set(SETTINGS_KEY, settings);
-  await store.save();
 }
 
 export async function loadFavorites(): Promise<string[]> {
@@ -56,7 +57,6 @@ export async function loadFavorites(): Promise<string[]> {
 
 export async function saveFavorites(ids: string[]): Promise<void> {
   await store.set(FAVORITES_KEY, ids);
-  await store.save();
 }
 
 export async function loadWatchProgress(): Promise<Record<string, WatchProgress>> {
@@ -65,7 +65,6 @@ export async function loadWatchProgress(): Promise<Record<string, WatchProgress>
 
 export async function saveWatchProgress(data: Record<string, WatchProgress>): Promise<void> {
   await store.set(WATCH_PROGRESS_KEY, data);
-  await store.save();
 }
 
 // Live channel "recently watched" registry: channel.id → last play timestamp.
@@ -77,6 +76,4 @@ export async function loadLiveRecent(): Promise<Record<string, number>> {
 
 export async function saveLiveRecent(data: Record<string, number>): Promise<void> {
   await store.set(LIVE_RECENT_KEY, data);
-  await store.save();
 }
-

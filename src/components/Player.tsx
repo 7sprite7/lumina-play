@@ -5,6 +5,7 @@ import type { Episode } from "../types";
 import { useAppStore, findEpisodeNeighbors } from "../store";
 import { selectEngine, type Engine } from "../lib/playback-engine";
 import { isMpvInstalled, openInMpv } from "../lib/mpv";
+import { IS_TAURI } from "../lib/platform";
 import { useT } from "../lib/i18n";
 import {
   IconCaptions,
@@ -651,10 +652,12 @@ export default function Player() {
               <button onClick={retry} className="btn-primary">
                 <IconRetry /> Tentar novamente
               </button>
-              <button onClick={copyUrl} className="btn-ghost">
-                {copied ? <IconCheck /> : <IconCopy />}
-                {copied ? "Copiado" : "Copiar URL"}
-              </button>
+              {IS_TAURI && (
+                <button onClick={copyUrl} className="btn-ghost">
+                  {copied ? <IconCheck /> : <IconCopy />}
+                  {copied ? "Copiado" : "Copiar URL"}
+                </button>
+              )}
               <button onClick={stop} className="btn-ghost">
                 <IconClose /> Fechar
               </button>
@@ -699,24 +702,30 @@ export default function Player() {
               </div>
             )}
           </div>
-          <button
-            onClick={handleOpenMpv}
-            disabled={mpvAvailable === false}
-            className="btn-ghost"
-            title={mpvAvailable === false ? t("player.mpvNotFound") : t("player.openMpvHint")}
-            aria-label={t("player.openMpv")}
-          >
-            <IconExternal />
-            <span className="hidden md:inline">mpv</span>
-          </button>
-          <button
-            onClick={copyUrl}
-            className="btn-ghost"
-            title={t("player.copyUrl")}
-            aria-label={t("player.copyUrl")}
-          >
-            {copied ? <IconCheck /> : <IconCopy />}
-          </button>
+          {/* mpv handoff and URL copy are desktop-only — the web build has no
+              local mpv install and the URL would be useless to most users. */}
+          {IS_TAURI && (
+            <>
+              <button
+                onClick={handleOpenMpv}
+                disabled={mpvAvailable === false}
+                className="btn-ghost"
+                title={mpvAvailable === false ? t("player.mpvNotFound") : t("player.openMpvHint")}
+                aria-label={t("player.openMpv")}
+              >
+                <IconExternal />
+                <span className="hidden md:inline">mpv</span>
+              </button>
+              <button
+                onClick={copyUrl}
+                className="btn-ghost"
+                title={t("player.copyUrl")}
+                aria-label={t("player.copyUrl")}
+              >
+                {copied ? <IconCheck /> : <IconCopy />}
+              </button>
+            </>
+          )}
           <button onClick={stop} className="btn-ghost" aria-label={t("player.close")}>
             <IconClose />
           </button>

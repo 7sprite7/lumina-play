@@ -1,4 +1,4 @@
-import { fetch } from "@tauri-apps/plugin-http";
+import { IS_TAURI } from "./platform";
 import type {
   LiveChannel,
   Movie,
@@ -82,7 +82,15 @@ function buildApiUrl(src: XtreamSource, action: string, params: Record<string, s
 }
 
 async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url, { method: "GET" });
+  // Tauri: native HTTP via plugin (no CORS). Web: browser fetch (CORS applies
+  // — assume the deployment proxies to the IPTV provider).
+  let res: Response;
+  if (IS_TAURI) {
+    const { fetch: tFetch } = await import("@tauri-apps/plugin-http");
+    res = (await tFetch(url, { method: "GET" })) as unknown as Response;
+  } else {
+    res = await fetch(url, { method: "GET" });
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return (await res.json()) as T;
 }
