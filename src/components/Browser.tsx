@@ -1,4 +1,4 @@
-import { forwardRef, useMemo } from "react";
+import { forwardRef, useDeferredValue, useMemo } from "react";
 import { VirtuosoGrid } from "react-virtuoso";
 import {
   useAppStore,
@@ -10,6 +10,7 @@ import {
 import type { ContentType, LiveChannel, Movie, SeriesItem, SortBy } from "../types";
 import Sidebar from "./Sidebar";
 import MediaCard from "./MediaCard";
+import ErrorBoundary from "./ErrorBoundary";
 import { useT } from "../lib/i18n";
 import { SearchIndex } from "../lib/search";
 import {
@@ -140,12 +141,18 @@ export default function Browser({ type, title }: Props) {
 
   const searchIndex = useMemo(() => new SearchIndex(byCategory), [byCategory]);
 
+  // Defer the search query so React can keep the input responsive while
+  // filtering 22k+ items. Without this the main thread stalls on every
+  // keystroke and the WebView shows a black frame for hundreds of ms — on
+  // some panels long enough to look like a crash.
+  const deferredQuery = useDeferredValue(searchQuery);
+
   const filtered = useMemo(() => {
-    const q = searchQuery.trim();
+    const q = deferredQuery.trim();
     const base = q ? searchIndex.search(q) : byCategory;
     if (!q || sortBy !== "default") return applySort(base, sortBy);
     return base;
-  }, [byCategory, searchIndex, searchQuery, sortBy]);
+  }, [byCategory, searchIndex, deferredQuery, sortBy]);
 
   const handleItemClick = (item: LiveChannel | Movie | SeriesItem) => {
     if (item.contentType === "live") {
@@ -234,12 +241,14 @@ export default function Browser({ type, title }: Props) {
             <p>{t("browser.noItems")}</p>
           </div>
         ) : (
-          <VirtualGrid
-            items={filtered}
-            minCardWidth={minCard}
-            aspectClass={aspect}
-            onItemClick={handleItemClick}
-          />
+          <ErrorBoundary>
+            <VirtualGrid
+              items={filtered}
+              minCardWidth={minCard}
+              aspectClass={aspect}
+              onItemClick={handleItemClick}
+            />
+          </ErrorBoundary>
         )}
       </div>
     </div>

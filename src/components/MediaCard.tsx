@@ -36,9 +36,22 @@ export default function MediaCard({ item, aspectClass = "aspect-video", onClick 
   const pct = showProgress ? Math.min(100, (progress.position / progress.duration) * 100) : 0;
 
   return (
-    <button
+    // role="button" instead of <button> because the favorite heart inside is
+    // a real <button>, and nested buttons are invalid HTML — that nesting
+    // was triggering a recursion in react-virtuoso when the dataset got
+    // rebuilt rapidly during search, eventually `RangeError: Maximum call
+    // stack size exceeded` and a black-screen.
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      className={`group ${aspectClass} relative w-full text-left bg-bg-900 border border-white/5 rounded-xl overflow-hidden hover:border-accent hover:shadow-[0_12px_30px_-10px] hover:shadow-accent/40 hover:-translate-y-0.5 transition-all`}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className={`group ${aspectClass} relative w-full text-left bg-bg-900 border border-white/5 rounded-xl overflow-hidden hover:border-accent hover:shadow-[0_12px_30px_-10px] hover:shadow-accent/40 hover:-translate-y-0.5 transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
     >
       {/* Poster / logo */}
       {logo ? (
@@ -112,6 +125,6 @@ export default function MediaCard({ item, aspectClass = "aspect-video", onClick 
           <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
         </div>
       )}
-    </button>
+    </div>
   );
 }
