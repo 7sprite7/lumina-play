@@ -317,10 +317,19 @@ export default function Player() {
   // can get into an infinite-loading state after a network blip on long-running
   // live playback — the decoder runs dry, MSE buffer underruns, but the engine
   // doesn't auto-recover. We monitor `video.currentTime`: if it stops
-  // advancing for 15s while playback is supposed to be running, we increment
-  // attemptCount which re-runs the load effect from scratch — equivalent of
-  // hitting "retry" automatically. Only armed for live; VOD pause/seek is
-  // legitimate.
+  // advancing while playback is supposed to be running, we re-fire the load
+  // effect (equivalent of hitting "retry").
+  //
+  // The tricky bit is telling a *user pause* (buffer healthy, user hit pause)
+  // apart from an *engine stall* (buffer empty, engine hung). The previous
+  // version checked `video.paused` and bailed early — but on a buffer
+  // underrun the browser auto-pauses the element, so the watchdog never
+  // fired and the user saw an infinite spinner. We now use `readyState`:
+  //
+  //   readyState >= 3 (HAVE_FUTURE_DATA) → buffer is full enough, paused is
+  //                                        user-initiated, leave alone
+  //   readyState <= 2 (HAVE_CURRENT_DATA  → buffer is dry, engine stalled,
+  //                    or HAVE_NOTHING)    reload after the timeout
   useEffect(() => {
     if (!playback || playback.kind !== "live") return;
     const video = videoRef.current;
@@ -331,8 +340,8 @@ export default function Player() {
     let lastReloadAt = 0;
 
     const interval = window.setInterval(() => {
-      // User-driven pause / seek → reset timer, no auto-reload.
-      if (video.paused || video.seeking) {
+      // Seeking is rare on live (no seek bar) but be defensive.
+      if (video.seeking) {
         lastTime = video.currentTime;
         lastChangeAt = Date.now();
         return;
@@ -342,16 +351,32 @@ export default function Player() {
         lastChangeAt = Date.now();
         return;
       }
-      // currentTime hasn't advanced since last tick.
+      // currentTime didn't advance. Distinguish "user paused with buffer
+      // available" (readyState 3-4) from "engine stalled / buffer dry"
+      // (readyState 0-2). Only reload in the latter case.
+      if (video.paused && video.readyState >= 3) {
+        lastTime = video.currentTime;
+        lastChangeAt = Date.now();
+        return;
+      }
       const stalledMs = Date.now() - lastChangeAt;
-      // 30s cooldown so we don't spam reloads if the upstream is just slow.
       const sinceReload = Date.now() - lastReloadAt;
-      if (stalledMs > 15_000 && sinceReload > 30_000) {
+      if (stalledMs > 12_000 && sinceReload > 25_000) {
         console.warn(
-          "[Player] live stall detected (15s without progress) — reloading"
+          `[Player] live stall — readyState=${video.readyState} paused=${video.paused} ` +
+            `${Math.round(stalledMs / 1000)}s without progress — reloading`
         );
         lastReloadAt = Date.now();
         lastChangeAt = Date.now();
+        // Force-reset the video element so the new engine attaches to a
+        // clean MediaSource. Without this, mpegts.js sometimes attaches a
+        // fresh MSE to a video that's still in an aborted state and the
+        // reload silently fails the same way as the original stall.
+        try {
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+        } catch {}
         setAttemptCount((c) => c + 1);
       }
     }, 3000);
