@@ -103,6 +103,30 @@ function toNumber(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+// Sort streams so they're grouped by the order their categories appear in
+// `get_*_categories`. The Xtream panel emits categories in display order
+// (matching the M3U output), but `get_*_streams` returns items by stream_id
+// or insertion order — when those orders differ the sidebar ends up with
+// a different category sequence than the panel/M3U shows. Sorting here
+// once means every downstream call (catalog cache, sidebar build, etc.)
+// sees the right order without further special-casing.
+//
+// `Array.prototype.sort` is stable in modern JS, so streams within a single
+// category keep their original API order.
+function sortByCategoryOrder<T extends { category_id?: string }>(
+  streams: T[],
+  categories: { category_id: string }[]
+): T[] {
+  const order = new Map<string, number>();
+  categories.forEach((c, i) => order.set(c.category_id, i));
+  const fallback = categories.length;
+  return [...streams].sort(
+    (a, b) =>
+      (order.get(a.category_id ?? "") ?? fallback) -
+      (order.get(b.category_id ?? "") ?? fallback)
+  );
+}
+
 export async function loadXtreamLive(src: XtreamSource): Promise<LiveChannel[]> {
   const [categories, streams] = await Promise.all([
     getJSON<XtreamCategory[]>(buildApiUrl(src, "get_live_categories")),
@@ -110,8 +134,9 @@ export async function loadXtreamLive(src: XtreamSource): Promise<LiveChannel[]> 
   ]);
   const catMap = new Map(categories.map((c) => [c.category_id, c.category_name]));
   const host = hostBase(src);
+  const sorted = sortByCategoryOrder(streams, categories);
 
-  return streams.map((s, i) => ({
+  return sorted.map((s, i) => ({
     id: `xtream-live-${src.id}-${s.stream_id}`,
     contentType: "live" as const,
     name: s.name,
@@ -134,8 +159,9 @@ export async function loadXtreamMovies(src: XtreamSource): Promise<Movie[]> {
   ]);
   const catMap = new Map(categories.map((c) => [c.category_id, c.category_name]));
   const host = hostBase(src);
+  const sorted = sortByCategoryOrder(streams, categories);
 
-  return streams.map((s, i) => {
+  return sorted.map((s, i) => {
     const ext = s.container_extension || "mp4";
     return {
       id: `xtream-movie-${src.id}-${s.stream_id}`,
@@ -159,8 +185,9 @@ export async function loadXtreamSeriesList(src: XtreamSource): Promise<SeriesIte
     getJSON<XtreamSeriesStream[]>(buildApiUrl(src, "get_series")),
   ]);
   const catMap = new Map(categories.map((c) => [c.category_id, c.category_name]));
+  const sorted = sortByCategoryOrder(streams, categories);
 
-  return streams.map((s, i) => {
+  return sorted.map((s, i) => {
     const backdrop = Array.isArray(s.backdrop_path) ? s.backdrop_path[0] : s.backdrop_path;
     return {
       id: `xtream-series-${src.id}-${s.series_id}`,
