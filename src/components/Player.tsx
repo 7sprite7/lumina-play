@@ -6,6 +6,7 @@ import { useAppStore, findEpisodeNeighbors } from "../store";
 import { selectEngine, type Engine } from "../lib/playback-engine";
 import { isMpvInstalled, openInMpv } from "../lib/mpv";
 import { IS_TAURI } from "../lib/platform";
+import { proxify } from "../lib/proxy";
 import { useT } from "../lib/i18n";
 import {
   IconCaptions,
@@ -191,13 +192,18 @@ export default function Player() {
       setSubtitleTracks([]);
       setCurrentSubtitle(-1);
 
+      // On the web build, route every cross-origin upstream through the
+      // deployment's generic /proxy/ so the browser sees a same-origin
+      // CORS-friendly URL. No-op on Tauri / HTTP-localhost.
+      const playUrl = proxify(url);
+
       const engine = selectEngine(url, kind);
       setEngineUsed(engine);
 
       if (engine === "hls" && Hls.isSupported()) {
         const hls = new Hls({ enableWorker: true, lowLatencyMode: kind === "live" });
         hlsRef.current = hls;
-        hls.loadSource(url);
+        hls.loadSource(playUrl);
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -238,7 +244,7 @@ export default function Player() {
           {
             type: url.toLowerCase().includes(".flv") ? "flv" : "mpegts",
             isLive: kind === "live",
-            url,
+            url: playUrl,
           },
           {
             enableWorker: true,
@@ -271,7 +277,7 @@ export default function Player() {
       }
 
       // native
-      video.src = url;
+      video.src = playUrl;
       video.play().catch(() => {});
     },
     [cleanup]

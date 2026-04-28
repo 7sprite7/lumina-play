@@ -13,6 +13,7 @@
 // the network path that's different.
 
 import { IS_TAURI } from "./platform";
+import { proxify } from "./proxy";
 
 export async function fetchText(url: string): Promise<string> {
   if (IS_TAURI) {
@@ -22,7 +23,9 @@ export async function fetchText(url: string): Promise<string> {
     if (!res.ok) throw new Error(`HTTP ${res.status} ao buscar ${url}`);
     return await res.text();
   }
-  const res = await fetch(url, { method: "GET" });
+  // Web: route cross-origin URLs through the deployment's CORS proxy
+  // (no-op for same-origin or HTTP localhost).
+  const res = await fetch(proxify(url), { method: "GET" });
   if (!res.ok) throw new Error(`HTTP ${res.status} ao buscar ${url}`);
   return await res.text();
 }
