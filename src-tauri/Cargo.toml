@@ -1,6 +1,6 @@
 [package]
 name = "lumina-play"
-version = "0.1.4"
+version = "0.1.5"
 description = "Lumina Play — modern IPTV player"
 authors = ["Jer"]
 edition = "2021"

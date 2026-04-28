@@ -313,6 +313,54 @@ export default function Player() {
     promptTriggeredRef.current = false;
   }, [playback?.itemId]);
 
+  // Stall watchdog for live streams. mpegts.js (and to a lesser extent hls.js)
+  // can get into an infinite-loading state after a network blip on long-running
+  // live playback — the decoder runs dry, MSE buffer underruns, but the engine
+  // doesn't auto-recover. We monitor `video.currentTime`: if it stops
+  // advancing for 15s while playback is supposed to be running, we increment
+  // attemptCount which re-runs the load effect from scratch — equivalent of
+  // hitting "retry" automatically. Only armed for live; VOD pause/seek is
+  // legitimate.
+  useEffect(() => {
+    if (!playback || playback.kind !== "live") return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    let lastTime = video.currentTime;
+    let lastChangeAt = Date.now();
+    let lastReloadAt = 0;
+
+    const interval = window.setInterval(() => {
+      // User-driven pause / seek → reset timer, no auto-reload.
+      if (video.paused || video.seeking) {
+        lastTime = video.currentTime;
+        lastChangeAt = Date.now();
+        return;
+      }
+      if (video.currentTime !== lastTime) {
+        lastTime = video.currentTime;
+        lastChangeAt = Date.now();
+        return;
+      }
+      // currentTime hasn't advanced since last tick.
+      const stalledMs = Date.now() - lastChangeAt;
+      // 30s cooldown so we don't spam reloads if the upstream is just slow.
+      const sinceReload = Date.now() - lastReloadAt;
+      if (stalledMs > 15_000 && sinceReload > 30_000) {
+        console.warn(
+          "[Player] live stall detected (15s without progress) — reloading"
+        );
+        lastReloadAt = Date.now();
+        lastChangeAt = Date.now();
+        setAttemptCount((c) => c + 1);
+      }
+    }, 3000);
+
+    return () => window.clearInterval(interval);
+    // attemptCount is in deps so the watchdog re-arms cleanly after each
+    // automatic reload (and after the user manually retries too).
+  }, [playback, attemptCount]);
+
   // Resume playback at saved position for VOD items with known progress.
   useEffect(() => {
     const video = videoRef.current;
