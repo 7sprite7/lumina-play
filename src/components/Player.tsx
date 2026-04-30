@@ -118,6 +118,14 @@ export default function Player() {
   const promptDismissedRef = useRef(false);
   const promptTriggeredRef = useRef(false);
 
+  // Reload throttling state — survives across the watchdog's effect re-runs
+  // (which happen on every attemptCount bump). Without these refs the
+  // cooldown was a local variable that reset to 0 on every reload, allowing
+  // back-to-back reloads every 8s and triggering an infinite loop when the
+  // upstream is dead.
+  const lastReloadAtRef = useRef(0);
+  const reloadTimesRef = useRef<number[]>([]);
+
   useEffect(() => {
     isMpvInstalled().then(setMpvAvailable);
   }, []);
@@ -149,11 +157,26 @@ export default function Player() {
     hlsRef.current = null;
     mpegtsRef.current = null;
 
-    // Defer engine teardown to a fresh task. mpegts.js terminates a Web Worker
-    // and tears down a MediaSource synchronously on `destroy()`; on some panels
-    // that briefly stalls the main thread, which presents as a black screen
-    // when closing live TV. Doing it after the next paint lets the Browser
-    // render first, so the user sees the list immediately.
+    // SYNCHRONOUS: stop the old engine's HTTP IO immediately. Without this
+    // the orphan's stream connection stays open until the deferred
+    // setTimeout below runs, and IPTV providers that rate-limit by
+    // concurrent connections per credential (e.g. vsplay.fun) see the
+    // new player's connect attempt as "user already streaming" and reject
+    // it with 403 — visible in the console as
+    // `[IOController] > Loader error, code = 403, msg = Forbidden`.
+    // unload() only touches IO loaders / workers, never the video
+    // element, so it's safe to run before the new attach happens.
+    if (mp) {
+      try {
+        mp.unload();
+      } catch {}
+    }
+
+    // Defer engine teardown (destroy/detach) to a fresh task. mpegts.js
+    // tears down a MediaSource synchronously on `destroy()` and that
+    // sometimes briefly stalls the main thread. Doing it after the next
+    // paint lets the Browser render first, so the user sees the list
+    // immediately when closing live TV.
     setTimeout(() => {
       if (hls) {
         try {
@@ -161,18 +184,44 @@ export default function Player() {
         } catch {}
       }
       if (mp) {
-        try {
-          mp.pause();
-        } catch {}
-        try {
-          mp.unload();
-        } catch {}
-        try {
-          mp.detachMediaElement();
-        } catch {}
-        try {
-          mp.destroy();
-        } catch {}
+        // CRITICAL: under React Strict Mode (dev double-mount) AND on
+        // every auto-retry (attemptCount bump), the cleanup of the
+        // previous mount runs AFTER the next mount has already attached
+        // a fresh mpegts player to the SAME <video>. mpegts.js's
+        // `pause()` calls `video.pause()` and `detachMediaElement()` /
+        // `destroy()` clear `video.src` — running any of those on the
+        // orphaned old player breaks the live new player (channel never
+        // starts, currentTime stuck at 0, or MSE yanked mid-stream).
+        //
+        // If a new player has taken over the slot, only call `unload()`
+        // — that operates on IO loaders / workers internally and never
+        // touches the video element. Let GC reclaim the orphan. If we're
+        // truly unmounting (no new player took over), do the full
+        // teardown.
+        const newPlayerTookOver = !!mpegtsRef.current;
+        if (newPlayerTookOver) {
+          // Orphan player from a Strict Mode double-mount or HMR reload.
+          // unload() already ran synchronously above. Just null the
+          // _mediaElement so any pending worker messages can't write to
+          // the shared <video> or to a closed SourceBuffer. We
+          // deliberately skip destroy() — it tears down listeners on
+          // the MediaSource / video and that cleanup has been racing
+          // the new player's attach in dev. Let GC reclaim the orphan.
+          const internal = mp as unknown as { _mediaElement?: unknown };
+          internal._mediaElement = null;
+        } else {
+          // No new player took over — true unmount. Full teardown.
+          // unload() already ran synchronously above; do the rest now.
+          try {
+            mp.pause();
+          } catch {}
+          try {
+            mp.detachMediaElement();
+          } catch {}
+          try {
+            mp.destroy();
+          } catch {}
+        }
       }
     }, 0);
   }, []);
@@ -197,6 +246,36 @@ export default function Player() {
       // CORS-friendly URL. No-op on Tauri / HTTP-localhost.
       const playUrl = proxify(url);
 
+      // Robust autoplay helper. Tries video.play() immediately; if the
+      // element is still paused after `canplay` fires (e.g. because Strict
+      // Mode's double-mount aborted the first promise, or autoplay was
+      // briefly blocked), retries once with a muted-fallback. The
+      // event listener is one-shot.
+      const ensurePlaying = () => {
+        const tryNow = () => {
+          if (!video.paused) return;
+          const p = video.play();
+          if (p && typeof (p as Promise<void>).catch === "function") {
+            (p as Promise<void>).catch((err: { name?: string } | undefined) => {
+              if (err?.name === "NotAllowedError") {
+                // Browser blocked autoplay-with-sound. Fall back to a
+                // muted autoplay so the user at least sees the video;
+                // they can unmute via the controls bar.
+                video.muted = true;
+                setMuted(true);
+                video.play().catch(() => {});
+              }
+            });
+          }
+        };
+        tryNow();
+        const onCanPlay = () => {
+          video.removeEventListener("canplay", onCanPlay);
+          tryNow();
+        };
+        video.addEventListener("canplay", onCanPlay);
+      };
+
       const engine = selectEngine(url, kind);
       setEngineUsed(engine);
 
@@ -207,7 +286,7 @@ export default function Player() {
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(() => {});
+          ensurePlaying();
           setAudioTracks(
             hls.audioTracks.map((t, i) => ({
               id: i,
@@ -268,17 +347,21 @@ export default function Player() {
           setError(`MPEG-TS: ${type} / ${detail}`);
           setLoading(false);
         });
+        // Note: we intentionally don't subscribe to mpegts'
+        // LOADING_COMPLETE for live recovery — some IPTV servers send the
+        // stream as a series of short Content-Length-bound chunks and
+        // emit LOADING_COMPLETE between every one of them. Handling it
+        // proactively burned through all our reload attempts before the
+        // first frame ever rendered. The watchdog below catches genuine
+        // stalls just fine.
         player.load();
-        const p = player.play();
-        if (p && typeof (p as Promise<void>).catch === "function") {
-          (p as Promise<void>).catch(() => {});
-        }
+        ensurePlaying();
         return;
       }
 
       // native
       video.src = playUrl;
-      video.play().catch(() => {});
+      ensurePlaying();
     },
     [cleanup]
   );
@@ -311,25 +394,56 @@ export default function Player() {
     setNextPromptVisible(false);
     promptDismissedRef.current = false;
     promptTriggeredRef.current = false;
+    // Fresh playback → reset the reload throttle so a new channel gets a
+    // clean slate of attempts.
+    lastReloadAtRef.current = 0;
+    reloadTimesRef.current = [];
   }, [playback?.itemId]);
 
-  // Stall watchdog for live streams. mpegts.js (and to a lesser extent hls.js)
-  // can get into an infinite-loading state after a network blip on long-running
-  // live playback — the decoder runs dry, MSE buffer underruns, but the engine
-  // doesn't auto-recover. We monitor `video.currentTime`: if it stops
-  // advancing while playback is supposed to be running, we re-fire the load
-  // effect (equivalent of hitting "retry").
+  // Centralised reload — used by the stall watchdog. 15s cooldown +
+  // max 3 reloads per 60s prevent runaway loops. We do NOT touch the
+  // <video> element here: the load() useEffect's cleanup already
+  // tears down the engine, and forcing `removeAttribute('src')`
+  // creates a race with the new mpegts player's attachMediaElement
+  // that can leave the video stuck at readyState=0 forever.
+  const tryReload = useCallback((reason: string) => {
+    const now = Date.now();
+    if (now - lastReloadAtRef.current < 15_000) {
+      console.log(`[Player] reload skipped (cooldown): ${reason}`);
+      return;
+    }
+    reloadTimesRef.current = reloadTimesRef.current.filter((t) => now - t < 60_000);
+    if (reloadTimesRef.current.length >= 3) {
+      console.warn(`[Player] giving up: ${reason} (3 reloads in last 60s)`);
+      setError("Stream indisponível. Tente novamente em alguns segundos.");
+      setLoading(false);
+      return;
+    }
+    reloadTimesRef.current.push(now);
+    lastReloadAtRef.current = now;
+    console.warn(`[Player] reloading: ${reason}`);
+    setAttemptCount((c) => c + 1);
+  }, []);
+
+  // Stall watchdog for live streams. mpegts.js can get stuck in an
+  // infinite-loading state after the upstream closes the connection — the
+  // decoder runs dry, MSE buffer underruns, the engine auto-pauses, and
+  // playback never recovers on its own.
   //
-  // The tricky bit is telling a *user pause* (buffer healthy, user hit pause)
-  // apart from an *engine stall* (buffer empty, engine hung). The previous
-  // version checked `video.paused` and bailed early — but on a buffer
-  // underrun the browser auto-pauses the element, so the watchdog never
-  // fired and the user saw an infinite spinner. We now use `readyState`:
+  // Multiple complementary signals (any one being "bad" tips the watchdog):
   //
-  //   readyState >= 3 (HAVE_FUTURE_DATA) → buffer is full enough, paused is
-  //                                        user-initiated, leave alone
-  //   readyState <= 2 (HAVE_CURRENT_DATA  → buffer is dry, engine stalled,
-  //                    or HAVE_NOTHING)    reload after the timeout
+  //   1. `currentTime` not advancing for the timeout window
+  //   2. `buffered` ahead of `currentTime` is < 0.5s (no headroom)
+  //   3. `readyState <= 2` (HAVE_CURRENT_DATA / HAVE_METADATA / HAVE_NOTHING)
+  //
+  // We exempt the case where the user explicitly paused with a healthy
+  // buffer (`paused && bufferAhead >= 0.5 && readyState >= 3`) — that's a
+  // legitimate pause, not a stall. Everything else after the timeout is
+  // treated as engine death and triggers a reload.
+  //
+  // On reload we hard-reset the <video> element first (pause + clear src
+  // + load) so the new mpegts player can attach a fresh MediaSource
+  // without inheriting the aborted state of the previous one.
   useEffect(() => {
     if (!playback || playback.kind !== "live") return;
     const video = videoRef.current;
@@ -337,54 +451,76 @@ export default function Player() {
 
     let lastTime = video.currentTime;
     let lastChangeAt = Date.now();
-    let lastReloadAt = 0;
+    // Only enable stall detection AFTER the stream has actually started
+    // playing (currentTime advanced past a small threshold at least once).
+    // This is what tells "channel never connected, stop bothering" apart
+    // from "channel was playing and froze, recover please". Without this,
+    // a slow-to-start channel triggers the watchdog before the first
+    // frame ever arrives, leading to reload storms that prevent it from
+    // ever starting.
+    let hasStarted = false;
 
     const interval = window.setInterval(() => {
-      // Seeking is rare on live (no seek bar) but be defensive.
+      if (!hasStarted) {
+        if (video.currentTime > 5) {
+          hasStarted = true;
+        } else {
+          // still booting — leave alone
+          lastTime = video.currentTime;
+          lastChangeAt = Date.now();
+          return;
+        }
+      }
+
       if (video.seeking) {
         lastTime = video.currentTime;
         lastChangeAt = Date.now();
         return;
       }
+
+      // How much buffered data lies ahead of the playhead? 0 = at the edge,
+      // about to starve. We look at the trailing buffered range because for
+      // live streams that's the only one that matters.
+      let bufferAhead = 0;
+      if (video.buffered.length > 0) {
+        const lastEnd = video.buffered.end(video.buffered.length - 1);
+        bufferAhead = Math.max(0, lastEnd - video.currentTime);
+      }
+
       if (video.currentTime !== lastTime) {
         lastTime = video.currentTime;
         lastChangeAt = Date.now();
         return;
       }
-      // currentTime didn't advance. Distinguish "user paused with buffer
-      // available" (readyState 3-4) from "engine stalled / buffer dry"
-      // (readyState 0-2). Only reload in the latter case.
-      if (video.paused && video.readyState >= 3) {
+
+      // currentTime didn't advance. Is it a legitimate user pause?
+      // Only if paused with a comfortable buffer and ready data.
+      if (video.paused && bufferAhead >= 0.5 && video.readyState >= 3) {
         lastTime = video.currentTime;
         lastChangeAt = Date.now();
         return;
       }
+
       const stalledMs = Date.now() - lastChangeAt;
-      const sinceReload = Date.now() - lastReloadAt;
-      if (stalledMs > 12_000 && sinceReload > 25_000) {
-        console.warn(
-          `[Player] live stall — readyState=${video.readyState} paused=${video.paused} ` +
-            `${Math.round(stalledMs / 1000)}s without progress — reloading`
-        );
-        lastReloadAt = Date.now();
+      if (stalledMs > 8_000) {
+        const reason =
+          `stall readyState=${video.readyState} paused=${video.paused} ` +
+          `bufferAhead=${bufferAhead.toFixed(2)}s stuck ${Math.round(
+            stalledMs / 1000
+          )}s`;
+        // Reset our local stall timer so we don't re-fire every tick if
+        // tryReload short-circuits on cooldown.
         lastChangeAt = Date.now();
-        // Force-reset the video element so the new engine attaches to a
-        // clean MediaSource. Without this, mpegts.js sometimes attaches a
-        // fresh MSE to a video that's still in an aborted state and the
-        // reload silently fails the same way as the original stall.
-        try {
-          video.pause();
-          video.removeAttribute("src");
-          video.load();
-        } catch {}
-        setAttemptCount((c) => c + 1);
+        tryReload(reason);
       }
-    }, 3000);
+    }, 2000);
 
     return () => window.clearInterval(interval);
     // attemptCount is in deps so the watchdog re-arms cleanly after each
-    // automatic reload (and after the user manually retries too).
-  }, [playback, attemptCount]);
+    // automatic reload (and after the user manually retries too). tryReload
+    // is referentially stable (useCallback with empty deps) so it doesn't
+    // cause re-runs.
+  }, [playback, attemptCount, tryReload]);
 
   // Resume playback at saved position for VOD items with known progress.
   useEffect(() => {

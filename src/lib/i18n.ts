@@ -149,6 +149,11 @@ const pt: Dict = {
     "O Lúmina Play foi pensado pra modo paisagem. Vire o celular pra deitado pra ter mais espaço e melhor navegação.",
   "orientation.autoHide": "Esta tela some automaticamente quando girar.",
 
+  "update.available": "Nova versão {version} disponível",
+  "update.youHave": "(você tem {version})",
+  "update.viewRelease": "Ver release",
+  "update.dismiss": "Dispensar",
+
   "series.watchedOn": "Assistindo",
   "series.noEpisodes": "Nenhum episódio disponível para esta série.",
   "series.loadingEpisodes": "Carregando episódios...",
@@ -298,6 +303,11 @@ const en: Dict = {
   "source.epgUrl": "EPG URL (XMLTV)",
   "source.epgUrlHint":
     "XMLTV address to display the programme guide. Auto-detected from the playlist's url-tvg header when not provided.",
+
+  "update.available": "New version {version} available",
+  "update.youHave": "(you have {version})",
+  "update.viewRelease": "View release",
+  "update.dismiss": "Dismiss",
 
   "orientation.title": "Please rotate your device",
   "orientation.desc":

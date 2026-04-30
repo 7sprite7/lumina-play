@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -12,8 +14,16 @@ const host = process.env.TAURI_DEV_HOST;
 // @ts-expect-error process is a nodejs global
 const isTauri = !!process.env.TAURI_ENV_PLATFORM || !!process.env.TAURI_PLATFORM;
 
+// Read the running app version from package.json so the in-app update
+// checker can compare it against the latest GitHub Release.
+const pkgPath = fileURLToPath(new URL("./package.json", import.meta.url));
+const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version: string };
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [
     react(),
     ...(isTauri

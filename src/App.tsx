@@ -10,6 +10,7 @@ import Preferences from "./components/Preferences";
 import WelcomePinDialog from "./components/WelcomePinDialog";
 import Player from "./components/Player";
 import OrientationLock from "./components/OrientationLock";
+import UpdateBanner from "./components/UpdateBanner";
 import { useT } from "./lib/i18n";
 
 export default function App() {
@@ -43,6 +44,7 @@ export default function App() {
 
   return (
     <div className={`flex flex-col h-full w-full bg-gradient theme-${theme}`}>
+      <UpdateBanner />
       <TopBar />
 
       <main className="flex-1 flex min-h-0 relative">
