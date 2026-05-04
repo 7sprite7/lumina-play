@@ -125,6 +125,13 @@ export default function Player() {
   // upstream is dead.
   const lastReloadAtRef = useRef(0);
   const reloadTimesRef = useRef<number[]>([]);
+  // Engine generation counter. Bumped on every fresh load() so callbacks
+  // captured by an older mpegts instance can compare against the current
+  // value and silently bail when the engine they belong to has been
+  // superseded — prevents orphaned workers from setting state, calling
+  // setError, or triggering a reload after a new player has already
+  // taken over. Borrowed from StreamVault's PlayerEngine pattern.
+  const engineGenRef = useRef(0);
 
   useEffect(() => {
     isMpvInstalled().then(setMpvAvailable);
@@ -231,6 +238,13 @@ export default function Player() {
       const video = videoRef.current;
       if (!video) return;
 
+      // Tag this engine instance with a unique generation. Async callbacks
+      // (mpegts events, hls error events, video element handlers) capture
+      // it in their closures and bail if a newer load() has incremented
+      // the counter past their copy — i.e. the callback belongs to an
+      // engine that's already been superseded.
+      const myGen = ++engineGenRef.current;
+
       cleanup();
       setError(null);
       setLoading(true);
@@ -310,10 +324,28 @@ export default function Player() {
         hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_e, data) => setCurrentAudio(data.id));
         hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, (_e, data) => setCurrentSubtitle(data.id));
         hls.on(Hls.Events.ERROR, (_e, data) => {
-          if (data.fatal) {
-            setError(`HLS: ${data.details || data.type}`);
+          // Drop late events from an already-superseded engine (Strict Mode
+          // double-mount, attemptCount bump, channel switch).
+          if (myGen !== engineGenRef.current) return;
+          if (!data.fatal) return;
+
+          // Same auth classifier as the mpegts path. hls.js exposes the HTTP
+          // response code on `data.response.code` for network errors.
+          const code =
+            (data as unknown as { response?: { code?: number } }).response?.code ?? 0;
+          const isAuthError = code === 401 || code === 403 || code === 456;
+          if (isAuthError) {
+            console.warn(`[Player] hls auth error code=${code} — refusing to retry`);
+            setError(
+              code === 456
+                ? "Limite de conexões simultâneas atingido. Feche outros dispositivos e tente novamente."
+                : "Servidor recusou a conexão (rate-limit ou bloqueio temporário). Aguarde 1-2 minutos e tente novamente."
+            );
             setLoading(false);
+            return;
           }
+          setError(`HLS: ${data.details || data.type}`);
+          setLoading(false);
         });
         return;
       }
@@ -343,10 +375,38 @@ export default function Player() {
         );
         mpegtsRef.current = player;
         player.attachMediaElement(video);
-        player.on(mpegts.Events.ERROR, (type, detail) => {
-          setError(`MPEG-TS: ${type} / ${detail}`);
-          setLoading(false);
-        });
+        player.on(
+          mpegts.Events.ERROR,
+          (type: string, detail: string, info?: { code?: number; msg?: string }) => {
+            // Drop late events from an already-superseded engine.
+            if (myGen !== engineGenRef.current) return;
+
+            // Classify HTTP errors so we don't keep hammering an upstream
+            // that's actively rejecting us. Borrowed from StreamVault's
+            // PlayerErrorClassifier:
+            //   401 / 403 / 456 → HTTP_AUTH → never retry, just surface
+            //   5xx / timeout / DNS → existing watchdog handles it
+            // 456 is the IPTV-specific "max connections reached" Xtream
+            // panels return when the user has too many concurrent streams.
+            const code = info?.code ?? 0;
+            const isAuthError = code === 401 || code === 403 || code === 456;
+            if (isAuthError) {
+              console.warn(
+                `[Player] mpegts auth error code=${code} — refusing to retry`
+              );
+              setError(
+                code === 456
+                  ? "Limite de conexões simultâneas atingido. Feche outros dispositivos e tente novamente."
+                  : "Servidor recusou a conexão (rate-limit ou bloqueio temporário). Aguarde 1-2 minutos e tente novamente."
+              );
+              setLoading(false);
+              return;
+            }
+
+            setError(`MPEG-TS: ${type} / ${detail}`);
+            setLoading(false);
+          }
+        );
         // Note: we intentionally don't subscribe to mpegts'
         // LOADING_COMPLETE for live recovery — some IPTV servers send the
         // stream as a series of short Content-Length-bound chunks and
@@ -430,26 +490,42 @@ export default function Player() {
   // decoder runs dry, MSE buffer underruns, the engine auto-pauses, and
   // playback never recovers on its own.
   //
-  // Multiple complementary signals (any one being "bad" tips the watchdog):
+  // Frame-aware health check (Fix B, borrowed from StreamVault's
+  // VideoStallDetector). We track BOTH `currentTime` AND
+  // `getVideoPlaybackQuality().totalVideoFrames`. If either is advancing,
+  // the stream is healthy. This catches two edge cases that a pure
+  // currentTime watchdog misses:
   //
-  //   1. `currentTime` not advancing for the timeout window
-  //   2. `buffered` ahead of `currentTime` is < 0.5s (no headroom)
-  //   3. `readyState <= 2` (HAVE_CURRENT_DATA / HAVE_METADATA / HAVE_NOTHING)
+  //   • PTS drift / playlist edge: mpegts.js sometimes ticks currentTime
+  //     because of timestamp adjustments while no actual frames render —
+  //     looks "fine" but viewer sees a freeze. Frame counter does not lie.
+  //   • Buffered-but-not-decoding: data arrived, MSE has it, but the
+  //     decoder is wedged. currentTime stays put; frame counter also stays
+  //     put — we want to reload.
   //
   // We exempt the case where the user explicitly paused with a healthy
   // buffer (`paused && bufferAhead >= 0.5 && readyState >= 3`) — that's a
   // legitimate pause, not a stall. Everything else after the timeout is
   // treated as engine death and triggers a reload.
-  //
-  // On reload we hard-reset the <video> element first (pause + clear src
-  // + load) so the new mpegts player can attach a fresh MediaSource
-  // without inheriting the aborted state of the previous one.
   useEffect(() => {
     if (!playback || playback.kind !== "live") return;
     const video = videoRef.current;
     if (!video) return;
 
+    // Browser quirks: getVideoPlaybackQuality is on HTMLVideoElement in
+    // Chrome/Safari; older Firefox exposed only the deprecated
+    // .mozPaintedFrames. Both Tauri (CEF/WebView2) and modern browsers
+    // we ship to support the standard call, but we still feature-detect
+    // so a missing method doesn't blow up the watchdog.
+    const getFrames = (): number => {
+      const q = (video as HTMLVideoElement & {
+        getVideoPlaybackQuality?: () => { totalVideoFrames: number };
+      }).getVideoPlaybackQuality?.();
+      return q?.totalVideoFrames ?? 0;
+    };
+
     let lastTime = video.currentTime;
+    let lastFrames = getFrames();
     let lastChangeAt = Date.now();
     // Only enable stall detection AFTER the stream has actually started
     // playing (currentTime advanced past a small threshold at least once).
@@ -461,12 +537,15 @@ export default function Player() {
     let hasStarted = false;
 
     const interval = window.setInterval(() => {
+      const nowFrames = getFrames();
+
       if (!hasStarted) {
-        if (video.currentTime > 5) {
+        if (video.currentTime > 5 || nowFrames > 0) {
           hasStarted = true;
         } else {
           // still booting — leave alone
           lastTime = video.currentTime;
+          lastFrames = nowFrames;
           lastChangeAt = Date.now();
           return;
         }
@@ -474,6 +553,7 @@ export default function Player() {
 
       if (video.seeking) {
         lastTime = video.currentTime;
+        lastFrames = nowFrames;
         lastChangeAt = Date.now();
         return;
       }
@@ -487,16 +567,24 @@ export default function Player() {
         bufferAhead = Math.max(0, lastEnd - video.currentTime);
       }
 
-      if (video.currentTime !== lastTime) {
+      // Healthy if EITHER currentTime advanced OR a new frame was decoded
+      // since last tick. Frame progress is the stronger signal — it means
+      // pixels actually changed on screen — but currentTime alone is enough
+      // for engines that report frames lazily.
+      const timeAdvanced = video.currentTime !== lastTime;
+      const framesAdvanced = nowFrames > lastFrames;
+      if (timeAdvanced || framesAdvanced) {
         lastTime = video.currentTime;
+        lastFrames = nowFrames;
         lastChangeAt = Date.now();
         return;
       }
 
-      // currentTime didn't advance. Is it a legitimate user pause?
-      // Only if paused with a comfortable buffer and ready data.
+      // Nothing advanced. Is it a legitimate user pause? Only if paused
+      // with a comfortable buffer and ready data.
       if (video.paused && bufferAhead >= 0.5 && video.readyState >= 3) {
         lastTime = video.currentTime;
+        lastFrames = nowFrames;
         lastChangeAt = Date.now();
         return;
       }
@@ -505,9 +593,8 @@ export default function Player() {
       if (stalledMs > 8_000) {
         const reason =
           `stall readyState=${video.readyState} paused=${video.paused} ` +
-          `bufferAhead=${bufferAhead.toFixed(2)}s stuck ${Math.round(
-            stalledMs / 1000
-          )}s`;
+          `bufferAhead=${bufferAhead.toFixed(2)}s frames=${nowFrames} ` +
+          `stuck ${Math.round(stalledMs / 1000)}s`;
         // Reset our local stall timer so we don't re-fire every tick if
         // tryReload short-circuits on cooldown.
         lastChangeAt = Date.now();
