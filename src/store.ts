@@ -329,6 +329,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     timeFormat: "24h",
     showEpg: false,
     hasOnboarded: false,
+    videoBrightness: 1,
   },
   adultUnlocked: false,
 

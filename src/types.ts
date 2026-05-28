@@ -51,6 +51,12 @@ export interface AppSettings {
   timeFormat: TimeFormat;
   showEpg: boolean;
   hasOnboarded: boolean;
+  // Multiplier applied to <video> via `filter: brightness()`. 1.0 = unchanged.
+  // WebView2 on Windows applies the OS color pipeline to <video>, which
+  // makes content look ~10-15% darker than native players (VLC, mpv) that
+  // bypass it. Letting users boost brightness in-app compensates for that
+  // without us having to fight the platform.
+  videoBrightness: number;
 }
 
 export interface Movie {

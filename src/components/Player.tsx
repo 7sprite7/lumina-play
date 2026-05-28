@@ -9,6 +9,7 @@ import { IS_TAURI } from "../lib/platform";
 import { proxify } from "../lib/proxy";
 import { useT } from "../lib/i18n";
 import {
+  IconBrightness,
   IconCaptions,
   IconCheck,
   IconClose,
@@ -63,6 +64,8 @@ export default function Player() {
   const currentEpg = useAppStore((s) => s.currentEpg);
   const epgLoading = useAppStore((s) => s.epgLoading);
   const showEpgSetting = useAppStore((s) => s.settings.showEpg);
+  const videoBrightness = useAppStore((s) => s.settings.videoBrightness);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   // Subscribe to the raw `series` array (stable reference until the catalog
   // changes) and derive neighbours via useMemo. Returning a fresh object from
   // a Zustand selector on every store tick would defeat ref-equality and
@@ -94,7 +97,7 @@ export default function Player() {
   const [subtitleTracks, setSubtitleTracks] = useState<Track[]>([]);
   const [currentSubtitle, setCurrentSubtitle] = useState<number>(-1);
 
-  const [menu, setMenu] = useState<"audio" | "sub" | null>(null);
+  const [menu, setMenu] = useState<"audio" | "sub" | "brightness" | null>(null);
   const [mpvAvailable, setMpvAvailable] = useState<boolean | null>(null);
   const [mpvError, setMpvError] = useState<string | null>(null);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -861,7 +864,23 @@ export default function Player() {
     } else if ((e.key === "p" || e.key === "P") && isSeries && hasPrevEpisode) {
       e.preventDefault();
       prevEpisodeAction();
+    } else if (e.key === "[") {
+      e.preventDefault();
+      adjustBrightness(-0.05);
+    } else if (e.key === "]") {
+      e.preventDefault();
+      adjustBrightness(0.05);
+    } else if (e.key === "\\") {
+      e.preventDefault();
+      updateSettings({ videoBrightness: 1 });
     }
+  };
+
+  // Clamped brightness adjustment shared between the slider and the
+  // keyboard shortcuts. Range matches the slider in the menu.
+  const adjustBrightness = (delta: number) => {
+    const next = Math.max(0.5, Math.min(2, +(videoBrightness + delta).toFixed(2)));
+    if (next !== videoBrightness) updateSettings({ videoBrightness: next });
   };
 
   const audioDisabled = audioTracks.length <= 1;
@@ -911,6 +930,17 @@ export default function Player() {
         <video
           ref={videoRef}
           className="w-full h-full bg-black"
+          // GPU-accelerated brightness adjustment. WebView2 on Windows pushes
+          // <video> through the OS color pipeline, which darkens content
+          // compared with native players (VLC, mpv). Users can compensate
+          // here without us having to do anything at the decoder level.
+          // `willChange: filter` hints the compositor to keep the layer on
+          // the GPU so the slider feels smooth in real time.
+          style={
+            videoBrightness !== 1
+              ? { filter: `brightness(${videoBrightness})`, willChange: "filter" }
+              : undefined
+          }
           autoPlay
           playsInline
           onPlay={() => {
@@ -1065,7 +1095,7 @@ export default function Player() {
           </div>
         )}
 
-        {menu && (
+        {(menu === "audio" || menu === "sub") && (
           <TrackMenu
             title={menu === "audio" ? t("player.audioMenu") : t("player.subMenu")}
             tracks={menu === "audio" ? audioTracks : subtitleTracks}
@@ -1083,6 +1113,15 @@ export default function Player() {
                 ? t("player.emptySubVod")
                 : t("player.emptySubLive")
             }
+          />
+        )}
+
+        {menu === "brightness" && (
+          <BrightnessMenu
+            value={videoBrightness}
+            onChange={(v) => updateSettings({ videoBrightness: v })}
+            onReset={() => updateSettings({ videoBrightness: 1 })}
+            onClose={() => setMenu(null)}
           />
         )}
 
@@ -1248,6 +1287,21 @@ export default function Player() {
             </button>
 
             <button
+              onClick={() => setMenu(menu === "brightness" ? null : "brightness")}
+              className={`btn-ghost ${menu === "brightness" ? "!text-accent" : ""} ${
+                videoBrightness !== 1 ? "!text-accent" : ""
+              }`}
+              aria-label="Brilho"
+              title={
+                videoBrightness === 1
+                  ? "Brilho ( [  ]  )"
+                  : `Brilho: ${Math.round(videoBrightness * 100)}%`
+              }
+            >
+              <IconBrightness />
+            </button>
+
+            <button
               onClick={togglePip}
               className={`btn-ghost ${isPip ? "!text-accent" : ""}`}
               aria-label="Picture-in-Picture"
@@ -1389,6 +1443,84 @@ function MenuRow({
         <span className="text-xs text-slate-500 uppercase">{sub}</span>
       )}
     </button>
+  );
+}
+
+function BrightnessMenu({
+  value,
+  onChange,
+  onReset,
+  onClose,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  // 50%–200% range. WebView2's darkening is ~10-15% so most users will
+  // sit around 110%–125%, but we leave headroom for OLED panels and HDR
+  // content that needs a much stronger lift.
+  const pct = Math.round(value * 100);
+  const presets = [0.9, 1, 1.1, 1.25, 1.5];
+  return (
+    <div
+      className="absolute right-4 bottom-24 z-20 w-72 bg-black/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl overflow-hidden"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between">
+        <div className="font-semibold text-sm">Brilho</div>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-100">
+          <IconClose />
+        </button>
+      </div>
+
+      <div className="px-3 py-3">
+        <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+          <span>50%</span>
+          <span className="text-slate-100 tabular-nums font-medium">{pct}%</span>
+          <span>200%</span>
+        </div>
+        <input
+          type="range"
+          min={0.5}
+          max={2}
+          step={0.05}
+          value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          className="w-full accent-indigo-500"
+          aria-label="Brilho do vídeo"
+        />
+
+        <div className="mt-3 flex gap-1.5 flex-wrap">
+          {presets.map((p) => (
+            <button
+              key={p}
+              onClick={() => onChange(p)}
+              className={`text-xs px-2 py-1 rounded border transition-colors ${
+                Math.abs(value - p) < 0.01
+                  ? "bg-accent/20 border-accent text-accent"
+                  : "border-white/10 text-slate-300 hover:bg-white/5"
+              }`}
+            >
+              {Math.round(p * 100)}%
+            </button>
+          ))}
+          <button
+            onClick={onReset}
+            className="text-xs px-2 py-1 rounded border border-white/10 text-slate-300 hover:bg-white/5 ml-auto"
+            title="Reset (\\)"
+          >
+            Reset
+          </button>
+        </div>
+
+        <div className="mt-3 text-[11px] text-slate-500 leading-snug">
+          Atalhos: <span className="text-slate-300">[</span> diminui ·{" "}
+          <span className="text-slate-300">]</span> aumenta ·{" "}
+          <span className="text-slate-300">\</span> reset
+        </div>
+      </div>
+    </div>
   );
 }
 

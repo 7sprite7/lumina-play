@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   timeFormat: "24h",
   showEpg: false,
   hasOnboarded: false,
+  videoBrightness: 1,
 };
 
 export async function loadSources(): Promise<Source[]> {
