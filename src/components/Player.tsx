@@ -10,6 +10,7 @@ import { proxify } from "../lib/proxy";
 import { useT } from "../lib/i18n";
 import {
   IconBrightness,
+  IconSpeed,
   IconCaptions,
   IconCheck,
   IconClose,
@@ -97,7 +98,12 @@ export default function Player() {
   const [subtitleTracks, setSubtitleTracks] = useState<Track[]>([]);
   const [currentSubtitle, setCurrentSubtitle] = useState<number>(-1);
 
-  const [menu, setMenu] = useState<"audio" | "sub" | "brightness" | null>(null);
+  const [menu, setMenu] = useState<"audio" | "sub" | "brightness" | "speed" | null>(null);
+  // VOD-only playback speed. Resets to 1× whenever a new item starts (see
+  // the useEffect on playback?.itemId) — speed is "per video" by convention,
+  // not a persisted preference. Local useState (not store) so it doesn't
+  // touch disk on every nudge.
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [mpvAvailable, setMpvAvailable] = useState<boolean | null>(null);
   const [mpvError, setMpvError] = useState<string | null>(null);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -347,7 +353,13 @@ export default function Player() {
             setLoading(false);
             return;
           }
-          setError(`HLS: ${data.details || data.type}`);
+          // Generic user-facing message. We deliberately don't surface the
+          // hls.js error details (data.details / data.type) because for an
+          // average IPTV viewer they're noise, and the previous text
+          // ("HLS: bufferStalledError") only invited copy-pasting the URL —
+          // which contains user/password — into chat support.
+          console.warn(`[Player] hls fatal:`, data.details, data.type);
+          setError("Não foi possível carregar. Verifique sua conexão ou contate seu provedor.");
           setLoading(false);
         });
         return;
@@ -406,7 +418,10 @@ export default function Player() {
               return;
             }
 
-            setError(`MPEG-TS: ${type} / ${detail}`);
+            // Same rationale as the hls path: tech detail goes to console
+            // only, user sees a generic, actionable message.
+            console.warn(`[Player] mpegts fatal:`, type, detail);
+            setError("Não foi possível carregar. Verifique sua conexão ou contate seu provedor.");
             setLoading(false);
           }
         );
@@ -461,6 +476,9 @@ export default function Player() {
     // clean slate of attempts.
     lastReloadAtRef.current = 0;
     reloadTimesRef.current = [];
+    // Fresh playback → reset speed to 1×. Matches Netflix / YouTube etc.
+    // (speed is per-video, not a global preference).
+    setPlaybackSpeed(1);
   }, [playback?.itemId]);
 
   // Centralised reload — used by the stall watchdog. 15s cooldown +
@@ -675,6 +693,17 @@ export default function Player() {
     video.volume = volume;
     video.muted = muted;
   }, [volume, muted]);
+
+  // Apply current playback speed. mpegts.js / hls.js never touch
+  // playbackRate themselves on live streams so this is purely a VOD
+  // concern, but we apply it unconditionally — keeps the wire-up simple
+  // and a live stream with rate ≠ 1 just falls back to 1 naturally when
+  // the buffer can't keep up.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.playbackRate !== playbackSpeed) video.playbackRate = playbackSpeed;
+  }, [playbackSpeed, playback]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -983,10 +1012,11 @@ export default function Player() {
           onError={() => {
             const v = videoRef.current;
             const err = v?.error;
-            const msg = err
-              ? `code ${err.code}: ${err.message || "Falha ao carregar"}`
-              : "Falha ao carregar";
-            setError(`Vídeo: ${msg}`);
+            // Tech details (MediaError code + browser message) go to console
+            // only — user sees a generic, non-leaky message. Same rationale
+            // as the hls / mpegts handlers above.
+            if (err) console.warn(`[Player] video error code=${err.code} msg=${err.message}`);
+            setError("Não foi possível carregar. Verifique sua conexão ou contate seu provedor.");
             setLoading(false);
           }}
           onClick={togglePlay}
@@ -1001,11 +1031,14 @@ export default function Player() {
         {error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center bg-black/60">
             <div className="text-red-400 font-medium">{error}</div>
-            <div className="text-slate-400 text-xs max-w-xl break-all">
+            {/* The previous overlay printed the upstream URL inline, which on
+                Xtream / direct-stream sources contains the user's username
+                and password (e.g. `http://host:port/USER/PASS/12345`). That
+                made support-chat screenshots accidentally leak credentials.
+                We keep only the engine + kind (no PII) for debug context. */}
+            <div className="text-slate-400 text-xs">
               Engine: <span className="text-slate-200">{engineUsed}</span>
               {" · "}Tipo: <span className="text-slate-200">{playback.kind}</span>
-              <br />
-              URL: <span className="text-slate-200">{playback.url}</span>
             </div>
             <div className="flex gap-2 mt-2">
               <button onClick={retry} className="btn-primary">
@@ -1121,6 +1154,17 @@ export default function Player() {
             value={videoBrightness}
             onChange={(v) => updateSettings({ videoBrightness: v })}
             onReset={() => updateSettings({ videoBrightness: 1 })}
+            onClose={() => setMenu(null)}
+          />
+        )}
+
+        {menu === "speed" && (
+          <SpeedMenu
+            value={playbackSpeed}
+            onSelect={(v) => {
+              setPlaybackSpeed(v);
+              setMenu(null);
+            }}
             onClose={() => setMenu(null)}
           />
         )}
@@ -1285,6 +1329,24 @@ export default function Player() {
                 </span>
               )}
             </button>
+
+            {isVod && (
+              <button
+                onClick={() => setMenu(menu === "speed" ? null : "speed")}
+                className={`btn-ghost ${menu === "speed" ? "!text-accent" : ""} ${
+                  playbackSpeed !== 1 ? "!text-accent" : ""
+                }`}
+                aria-label="Velocidade"
+                title={playbackSpeed === 1 ? "Velocidade" : `Velocidade: ${playbackSpeed}×`}
+              >
+                <IconSpeed />
+                {playbackSpeed !== 1 && (
+                  <span className="text-[10px] px-1 rounded bg-white/10 tabular-nums">
+                    {playbackSpeed}×
+                  </span>
+                )}
+              </button>
+            )}
 
             <button
               onClick={() => setMenu(menu === "brightness" ? null : "brightness")}
@@ -1519,6 +1581,52 @@ function BrightnessMenu({
           <span className="text-slate-300">]</span> aumenta ·{" "}
           <span className="text-slate-300">\</span> reset
         </div>
+      </div>
+    </div>
+  );
+}
+
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+
+function SpeedMenu({
+  value,
+  onSelect,
+  onClose,
+}: {
+  value: number;
+  onSelect: (v: number) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="absolute right-4 bottom-24 z-20 w-56 bg-black/95 backdrop-blur border border-white/10 rounded-xl shadow-2xl overflow-hidden"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between">
+        <div className="font-semibold text-sm">Velocidade</div>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-100">
+          <IconClose />
+        </button>
+      </div>
+      <div className="max-h-72 overflow-y-auto py-1">
+        {SPEED_PRESETS.map((p) => {
+          const active = Math.abs(value - p) < 0.001;
+          return (
+            <button
+              key={p}
+              onClick={() => onSelect(p)}
+              className={`w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-white/5 ${
+                active ? "text-accent" : "text-slate-200"
+              }`}
+            >
+              <span className="w-4">{active ? <IconCheck /> : null}</span>
+              <span className="flex-1 tabular-nums">{p}×</span>
+              {p === 1 && (
+                <span className="text-xs text-slate-500 uppercase">Normal</span>
+              )}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

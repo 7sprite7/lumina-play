@@ -294,3 +294,14 @@ export const IconBrightness = (p: SVGProps<SVGSVGElement>) => (
     <line x1="16.95" y1="7.05" x2="19.07" y2="4.93" />
   </svg>
 );
+
+export const IconSpeed = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...base(p)}>
+    {/* speedometer arc */}
+    <path d="M3 17a9 9 0 1 1 18 0" />
+    {/* needle pointing to ~2 o'clock (fast) */}
+    <line x1="12" y1="17" x2="17" y2="10" />
+    {/* pivot dot */}
+    <circle cx="12" cy="17" r="1.2" fill="currentColor" stroke="none" />
+  </svg>
+);
