@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-viewport"
+description = "Enables the set_viewport command without any pre-configured scope."
+commands.allow = ["set_viewport"]
+
+[[permission]]
+identifier = "deny-set-viewport"
+description = "Denies the set_viewport command without any pre-configured scope."
+commands.deny = ["set_viewport"]

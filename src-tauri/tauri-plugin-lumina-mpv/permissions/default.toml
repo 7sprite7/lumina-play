@@ -1,0 +1,22 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Default permissions for the Lúmina Play MPV plugin — grants every command the plugin exposes. Scope narrowing is unnecessary here because the plugin only runs inside the app's own windows."
+permissions = [
+    "allow-play",
+    "allow-pause",
+    "allow-resume",
+    "allow-stop",
+    "allow-seek",
+    "allow-set-speed",
+    "allow-set-volume",
+    "allow-set-mute",
+    "allow-set-brightness",
+    "allow-set-viewport",
+    "allow-hide-viewport",
+    "allow-raise-viewport",
+    "allow-get-tracks",
+    "allow-set-audio-track",
+    "allow-set-subtitle-track",
+    "allow-get-state",
+]

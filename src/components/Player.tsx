@@ -4,8 +4,8 @@ import mpegts from "mpegts.js";
 import type { Episode } from "../types";
 import { useAppStore, findEpisodeNeighbors } from "../store";
 import { selectEngine, type Engine } from "../lib/playback-engine";
-import { isMpvInstalled, openInMpv } from "../lib/mpv";
 import { IS_TAURI } from "../lib/platform";
+import * as nativeMpv from "../lib/native-mpv";
 import { proxify } from "../lib/proxy";
 import { useT } from "../lib/i18n";
 import {
@@ -15,7 +15,6 @@ import {
   IconCheck,
   IconClose,
   IconCopy,
-  IconExternal,
   IconFullscreen,
   IconLanguage,
   IconPause,
@@ -77,6 +76,16 @@ export default function Player() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // When the native mpv engine is used, the OS composites a top-level
+  // popup over this element — so our React overlays (close button,
+  // play/pause, SeekBar) would be hidden if the popup covered the whole
+  // stage. `videoAreaRef` is the strict rect the mpv popup is pinned to;
+  // we shrink it to leave `TOP_BAR_H` / `BOTTOM_BAR_H` strips at the
+  // edges whenever the controls are visible so they stay on top of the
+  // video. When controls auto-hide, the area expands back to fill the
+  // stage. On the web/WebView engines the `<video>` fills its parent
+  // and overlays naturally sit above it, so this layer is a no-op there.
+  const videoAreaRef = useRef<HTMLDivElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<mpegts.Player | null>(null);
 
@@ -104,10 +113,53 @@ export default function Player() {
   // not a persisted preference. Local useState (not store) so it doesn't
   // touch disk on every nudge.
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [mpvAvailable, setMpvAvailable] = useState<boolean | null>(null);
-  const [mpvError, setMpvError] = useState<string | null>(null);
   const [controlsVisible, setControlsVisible] = useState(true);
+  // Mirror of the Tauri window's fullscreen flag. We can't rely on
+  // `document.fullscreenElement` on the native-mpv path because our
+  // toggle now flips the OS-level window fullscreen (so the mpv popup
+  // follows) instead of the HTML element's. The .player-stage CSS
+  // normally clamps itself to max-width 72rem / 16:9 on desktop so a
+  // non-maximized Tauri window shows a centred letterboxed box; when
+  // fullscreen we need to drop that clamp or the "fullscreen" video
+  // ends up a 1152px island surrounded by black.
+  const [isTauriFullscreen, setIsTauriFullscreen] = useState(false);
   const hideTimerRef = useRef<number | null>(null);
+  // When our own fullscreen toggle last fired. The window-resize listener
+  // uses it to stay out of the way while the OS transition is in flight —
+  // see the fullscreen-sync effect below.
+  const fsToggledAtRef = useRef(0);
+
+  // Mirrors of the audio/rate state for the native-mpv path. `load()` is a
+  // useCallback with a tiny dep list (so a volume nudge never re-creates
+  // the engine); it still needs the *current* values to push into mpv once
+  // `play()` resolves, hence refs instead of deps. Kept in sync by the
+  // effect right below.
+  const volumeRef = useRef(volume);
+  const mutedRef = useRef(muted);
+  const speedRef = useRef(playbackSpeed);
+  const brightnessRef = useRef(videoBrightness);
+  // Latest position/duration read from mpv by the state poll further
+  // down. Seeking and the Continue-Watching bookkeeping both need the
+  // current numbers from inside callbacks that must not re-run on every
+  // tick, so they read this ref instead of the `currentTime` state.
+  const nativeTimeRef = useRef({ position: 0, duration: 0 });
+  // One-shot guard for mpv's `eof-reached`, which stays true from the end
+  // of a file until the next loadfile.
+  const eofHandledRef = useRef(false);
+  useEffect(() => {
+    volumeRef.current = volume;
+    mutedRef.current = muted;
+    speedRef.current = playbackSpeed;
+    brightnessRef.current = videoBrightness;
+  }, [volume, muted, playbackSpeed, videoBrightness]);
+
+  // Brightness on the native path: the CSS filter on the `<video>`
+  // element below never touches mpv's own surface, so the slider has to
+  // reach the `brightness` property in the gpu renderer instead.
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv) return;
+    nativeMpv.setBrightness(videoBrightness).catch(() => {});
+  }, [videoBrightness]);
 
   const isVod = playback?.kind === "vod";
   const isLive = playback?.kind === "live";
@@ -141,10 +193,6 @@ export default function Player() {
   // setError, or triggering a reload after a new player has already
   // taken over. Borrowed from StreamVault's PlayerEngine pattern.
   const engineGenRef = useRef(0);
-
-  useEffect(() => {
-    isMpvInstalled().then(setMpvAvailable);
-  }, []);
 
   const resetHideTimer = useCallback(() => {
     setControlsVisible(true);
@@ -246,6 +294,89 @@ export default function Player() {
     (url: string, kind: "live" | "vod") => {
       const video = videoRef.current;
       if (!video) return;
+
+      // Native mpv path (Tauri desktop on Windows). The plugin handles
+      // playback entirely in a popup window the OS composites above the
+      // WebView — our `<video>` element stays mounted but just paints
+      // black behind it. We tell mpv to play(), size the popup to match
+      // the containerRef via setViewport (fired by the ResizeObserver
+      // effect below), and short-circuit the hls.js / mpegts.js setup.
+      // The web build keeps the WebView engine path untouched.
+      if (nativeMpv.hasNativeMpv) {
+        setEngineUsed("mpv");
+        setError(null);
+        setLoading(true);
+        // Same reset the WebView path does below — otherwise the previous
+        // channel's duration/position stays on the seek bar and its audio
+        // / subtitle menus keep listing tracks that are gone, until the
+        // native pollers catch up a second later.
+        setCurrentTime(0);
+        setDuration(0);
+        setAudioTracks([]);
+        setCurrentAudio(null);
+        setSubtitleTracks([]);
+        setCurrentSubtitle(-1);
+        // VOD resume. The "seek the <video> element on loadedmetadata"
+        // effect below can't work here (no media attached), so the saved
+        // position rides along as mpv's `start` option instead. Read
+        // straight from the store rather than through props/state so
+        // `load` keeps its tiny dependency list.
+        let startTime: number | undefined;
+        if (kind === "vod") {
+          const store = useAppStore.getState();
+          const itemId = store.playback?.itemId;
+          const saved = itemId ? store.watchProgress[itemId] : undefined;
+          if (
+            saved &&
+            saved.position >= 5 &&
+            (!saved.duration || saved.position < saved.duration * 0.95)
+          ) {
+            startTime = saved.position;
+          }
+        }
+        // Fire-and-forget; errors come back via the native-mpv:error
+        // event (M4). We don't await because this callback is sync.
+        nativeMpv
+          .play(url, startTime !== undefined ? { startTime } : kind === "live" ? {} : undefined)
+          .then(() => {
+            setLoading(false);
+            setPlaying(true);
+            // Once the plugin confirms play() returned, the child HWND
+            // exists and we can pin it to the player-stage. The viewport
+            // useEffect fires on mount but ensure_mpv runs AFTER on the
+            // UI thread, so the first `setViewport()` from there races
+            // the create and gets "mpv not initialized yet". Resending
+            // from here guarantees the final rect lands.
+            const area = videoAreaRef.current ?? containerRef.current;
+            if (area) {
+              const r = area.getBoundingClientRect();
+              void nativeMpv.setViewport(r.left, r.top, r.width, r.height);
+            }
+            // Same race for the audio/rate properties: the effects that
+            // watch `volume` / `muted` / `playbackSpeed` run on mount,
+            // before libmpv exists, and get "mpv not initialized". Push
+            // the current values now that it does. (mpv keeps `volume`
+            // across loadfile, but `speed` has to be re-asserted because
+            // we reset the UI to 1× on every new item.)
+            nativeMpv.setVolume(volumeRef.current * 100).catch(() => {});
+            nativeMpv.setMute(mutedRef.current).catch(() => {});
+            nativeMpv.setSpeed(speedRef.current).catch(() => {});
+            nativeMpv.setBrightness(brightnessRef.current).catch(() => {});
+          })
+          .catch((e: unknown) => {
+            console.warn("[Player] nativeMpv.play failed", e);
+            setError(
+              "Não foi possível carregar. Verifique sua conexão ou contate seu provedor."
+            );
+            setLoading(false);
+            // Move the popup off-screen so our React error overlay is
+            // actually visible — otherwise the still-mounted mpv HWND
+            // (even blank) sits above the WebView and the user never
+            // sees the "Tentar novamente" button.
+            nativeMpv.hideViewport().catch(() => {});
+          });
+        return;
+      }
 
       // Tag this engine instance with a unique generation. Async callbacks
       // (mpegts events, hls error events, video element handlers) capture
@@ -453,6 +584,13 @@ export default function Player() {
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
       }
+      // Native mpv path: tell the plugin to stop + move the popup off
+      // screen. Without this the mpv window hangs around when the user
+      // closes the player, floating above the catalog.
+      if (nativeMpv.hasNativeMpv) {
+        nativeMpv.stop().catch(() => {});
+        nativeMpv.hideViewport().catch(() => {});
+      }
       const v = videoRef.current;
       if (v) {
         try {
@@ -630,6 +768,84 @@ export default function Player() {
     // cause re-runs.
   }, [playback, attemptCount, tryReload]);
 
+  // Native mpv viewport sync. The plugin draws into a popup window that
+  // the OS composites above the WebView — but WebView doesn't know
+  // anything about the popup's existence, so we have to tell the plugin
+  // where to put it. Any time the player-stage changes position or size
+  // (window resize, fullscreen toggle, dev-tools opening) we recompute
+  // the client-area rect and push it. ResizeObserver covers the "stage
+  // grew/shrunk" case; window resize covers the ancestor-chain case
+  // (e.g. the whole app window grew but the stage percentage layout
+  // stayed the same so the ResizeObserver didn't fire).
+  // Keep `isTauriFullscreen` in sync with the actual window state, so
+  // we also catch F11 / taskbar maximize that didn't go through our
+  // toggle button.
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        const fs = await win.isFullscreen();
+        if (!cancelled) setIsTauriFullscreen(fs);
+        unlisten = await win.onResized(async () => {
+          // Ignore the resize storm our own toggle causes. `setFullscreen`
+          // resizes the window before Tauri's `isFullscreen()` flips, so
+          // querying it here would answer with the OLD value and undo the
+          // optimistic flag — the stage snapped back to its clamped
+          // 72rem/16:9 box and "fullscreen" looked like a letterboxed
+          // island. Outside that window (F11, taskbar maximize, the OS
+          // leaving fullscreen on its own) the query is still what keeps
+          // the flag honest.
+          if (Date.now() - fsToggledAtRef.current < 1000) return;
+          try {
+            const nowFs = await win.isFullscreen();
+            setIsTauriFullscreen(nowFs);
+          } catch {}
+        });
+      } catch (e) {
+        console.warn("[Player] fullscreen sync setup failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv || !playback) return;
+    const area = videoAreaRef.current;
+    if (!area) return;
+
+    const push = () => {
+      const r = area.getBoundingClientRect();
+      void nativeMpv.setViewport(r.left, r.top, r.width, r.height);
+    };
+    push();
+
+    // Observing videoAreaRef (not containerRef) means the CSS transition
+    // that shrinks the area when controls appear — and expands it when
+    // they auto-hide — fires a `resize` for every intermediate frame.
+    // The popup follows along, so controls slide in over black strips
+    // instead of over live video, and the video crops/uncrops smoothly.
+    const ro = new ResizeObserver(push);
+    ro.observe(area);
+    window.addEventListener("resize", push);
+    // Fullscreen entering/exiting fires fullscreenchange on the document
+    // and we need to re-push once the layout settles — defer by a frame.
+    const onFs = () => requestAnimationFrame(push);
+    document.addEventListener("fullscreenchange", onFs);
+
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", push);
+      document.removeEventListener("fullscreenchange", onFs);
+    };
+  }, [playback]);
+
   // Resume playback at saved position for VOD items with known progress.
   useEffect(() => {
     const video = videoRef.current;
@@ -659,19 +875,30 @@ export default function Player() {
 
     const tick = () => {
       const v = videoRef.current;
-      if (!v || v.paused || !isFinite(v.duration) || v.duration < 60) return;
-      const pct = v.currentTime / v.duration;
+      // On the native path the `<video>` element has no media attached —
+      // position and duration come from mpv via the state poll. Without
+      // this branch Continue Watching silently stopped recording anything
+      // on the desktop build.
+      const native = nativeMpv.hasNativeMpv;
+      const position = native ? nativeTimeRef.current.position : v?.currentTime ?? 0;
+      const total = native ? nativeTimeRef.current.duration : v?.duration ?? 0;
+      // Paused playback can't advance the position, so saving while
+      // paused is harmless — we only skip it on the WebView path to keep
+      // the original behaviour untouched.
+      if (!native && (!v || v.paused)) return;
+      if (!isFinite(total) || total < 60) return;
+      const pct = position / total;
       if (pct >= 0.95) {
         // Watched to the end — remove from continue watching
         clearProgress(itemId);
         return;
       }
-      if (v.currentTime < 5) return;
+      if (position < 5) return;
       saveProgress({
         itemId,
         parentId: playback.parentId,
-        position: v.currentTime,
-        duration: v.duration,
+        position,
+        duration: total,
         updatedAt: Date.now(),
         title: playback.title,
         subtitle: playback.subtitle,
@@ -685,13 +912,23 @@ export default function Player() {
       clearInterval(interval);
       tick(); // final save on unmount
     };
+    // nativeTimeRef is a ref — stable, intentionally not a dependency.
   }, [playback, saveProgress, clearProgress]);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
-    video.volume = volume;
-    video.muted = muted;
+    if (video) {
+      video.volume = volume;
+      video.muted = muted;
+    }
+    // Native path: the `<video>` element is silent and parked behind the
+    // mpv popup, so the slider has to reach libmpv instead. Rejections
+    // ("mpv not initialized") are expected before the first play() and
+    // get re-applied from load()'s .then().
+    if (nativeMpv.hasNativeMpv) {
+      nativeMpv.setVolume(volume * 100).catch(() => {});
+      nativeMpv.setMute(muted).catch(() => {});
+    }
   }, [volume, muted]);
 
   // Apply current playback speed. mpegts.js / hls.js never touch
@@ -701,9 +938,174 @@ export default function Player() {
   // the buffer can't keep up.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
-    if (video.playbackRate !== playbackSpeed) video.playbackRate = playbackSpeed;
+    if (video && video.playbackRate !== playbackSpeed) {
+      video.playbackRate = playbackSpeed;
+    }
+    if (nativeMpv.hasNativeMpv) {
+      nativeMpv.setSpeed(playbackSpeed).catch(() => {});
+    }
   }, [playbackSpeed, playback]);
+
+  // Leave OS-level fullscreen when the player closes.
+  //
+  // The native path toggles the *window* fullscreen (so the mpv popup
+  // follows along) rather than `document.requestFullscreen`, so the
+  // `document.fullscreenElement` cleanup in the playback effect never
+  // applies here — closing a channel while fullscreen left the whole app
+  // fullscreen on top of the catalog.
+  //
+  // It has to hang off unmount, not off `playback`: App renders
+  // `{playback && <Player />}`, so when playback stops this component is
+  // gone and an effect keyed on `playback` never gets to see the null.
+  // And it can't live in the playback effect's cleanup either — that one
+  // also runs on every channel change, where dropping fullscreen would
+  // be wrong.
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv) return;
+    const mountedAt = Date.now();
+    return () => {
+      // React Strict Mode (dev only) mounts → unmounts → re-mounts within
+      // a few ms. That teardown isn't the user closing the player, so
+      // leave fullscreen alone.
+      if (Date.now() - mountedAt < 500) return;
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          const win = getCurrentWindow();
+          if (await win.isFullscreen()) await win.setFullscreen(false);
+        } catch (e) {
+          console.warn("[Player] exit fullscreen on close failed", e);
+        }
+      })();
+    };
+  }, []);
+
+  // ---- native-mpv: playback state poll ----
+  //
+  // On the native path the `<video>` element never plays anything, so none
+  // of the events the WebView path relies on (timeupdate, durationchange,
+  // waiting, ended) ever fire. Everything the control bar needs comes from
+  // polling mpv's properties every 500 ms: position + duration for the
+  // seek bar, `playing` for the play/pause icon, `buffering` for the
+  // spinner, and `eof` to chain the next episode.
+  //
+  // 500 ms is the same cadence the `<video>` timeupdate event fires at
+  // (~4/s in practice), and the Rust side is five property reads behind a
+  // mutex — cheap enough to leave running for the whole session.
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv || !playback) return;
+    eofHandledRef.current = false;
+    nativeTimeRef.current = { position: 0, duration: 0 };
+    let cancelled = false;
+
+    const tick = async () => {
+      let st: nativeMpv.PlaybackState;
+      try {
+        st = await nativeMpv.getState();
+      } catch {
+        return; // mpv not up yet — next tick will find it
+      }
+      if (cancelled || !st) return;
+
+      nativeTimeRef.current = { position: st.position, duration: st.duration };
+      setCurrentTime(st.position);
+      setDuration(Number.isFinite(st.duration) && st.duration > 0 ? st.duration : 0);
+      setPlaying(st.playing);
+      // Only ever *raise* loading from here. `load()` already shows the
+      // spinner while the channel opens and clears it when play()
+      // resolves; if we mirrored `!st.playing` the spinner would also
+      // appear every time the user simply pauses.
+      if (st.buffering) setLoading(true);
+      else if (st.playing) setLoading(false);
+
+      // Netflix-style next-episode prompt — the native twin of the
+      // `onTimeUpdate` handler on the `<video>` element.
+      if (
+        isSeries &&
+        hasNextEpisode &&
+        !promptDismissedRef.current &&
+        !promptTriggeredRef.current &&
+        st.duration > 60 &&
+        st.duration - st.position <= 20
+      ) {
+        promptTriggeredRef.current = true;
+        setNextPromptVisible(true);
+      }
+
+      // `eof-reached` stays true until the next loadfile (we run with
+      // keep-open=yes, so mpv parks on the last frame instead of
+      // unloading), hence the one-shot guard.
+      if (st.eof && !eofHandledRef.current) {
+        eofHandledRef.current = true;
+        if (isSeries && hasNextEpisode && !promptDismissedRef.current) {
+          nextEpisodeAction();
+        }
+      }
+    };
+
+    void tick();
+    const id = window.setInterval(tick, 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [playback, isSeries, hasNextEpisode, nextEpisodeAction]);
+
+  // ---- native-mpv: track list poll ----
+  //
+  // mpv populates `track-list` asynchronously after the file opens (and
+  // live streams can add tracks mid-playback), so we poll instead of
+  // reading once. The signature check keeps React from re-rendering the
+  // menus on every tick.
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv || !playback) return;
+    let cancelled = false;
+    let lastSig = "";
+
+    const poll = async () => {
+      let tracks: nativeMpv.Track[];
+      try {
+        tracks = await nativeMpv.getTracks();
+      } catch {
+        return;
+      }
+      if (cancelled || !tracks) return;
+      const sig = tracks.map((t) => `${t.kind}:${t.id}:${t.selected ? 1 : 0}`).join("|");
+      if (sig === lastSig) return;
+      lastSig = sig;
+
+      const audio = tracks.filter((t) => t.kind === "audio");
+      const subs = tracks.filter((t) => t.kind === "sub");
+      // `id` here is the mpv track id (what `aid` / `sid` take), not an
+      // array index like on the hls.js path — selectAudio / selectSubtitle
+      // branch on the engine and pass it straight through.
+      setAudioTracks(
+        audio.map((t, i) => ({
+          id: t.id,
+          label: t.title || t.lang || `Áudio ${i + 1}`,
+          lang: t.lang,
+        }))
+      );
+      setSubtitleTracks(
+        subs.map((t, i) => ({
+          id: t.id,
+          label: t.title || t.lang || `Legenda ${i + 1}`,
+          lang: t.lang,
+        }))
+      );
+      const selAudio = audio.find((t) => t.selected);
+      setCurrentAudio(selAudio ? selAudio.id : null);
+      const selSub = subs.find((t) => t.selected);
+      setCurrentSubtitle(selSub ? selSub.id : -1);
+    };
+
+    void poll();
+    const id = window.setInterval(poll, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [playback]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -771,6 +1173,20 @@ export default function Player() {
   if (!playback) return null;
 
   const togglePlay = () => {
+    // Native mpv path: ignore the <video> element (it's paused black
+    // behind the popup anyway) and talk to the plugin instead. We flip
+    // the local `playing` state optimistically so the button icon
+    // updates without waiting on an event round-trip.
+    if (nativeMpv.hasNativeMpv) {
+      if (playing) {
+        void nativeMpv.pause();
+        setPlaying(false);
+      } else {
+        void nativeMpv.resume();
+        setPlaying(true);
+      }
+      return;
+    }
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) v.play();
@@ -791,7 +1207,36 @@ export default function Player() {
     }
   };
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = async () => {
+    // Native mpv path: HTML `requestFullscreen` on the containerRef puts
+    // WebView2 into its own fullscreen compositor, and our top-level mpv
+    // popup either gets painted behind it or stops receiving the
+    // HTTRANSPARENT hit-test (so mouse-wiggles no longer wake up the
+    // controls). Flipping the Tauri window to OS-level fullscreen keeps
+    // the WebView in its normal compositing tree, and the popup follows
+    // along via the `on_window_event` Moved/Resized listener in the
+    // plugin — same relative position, same hit-test transparency.
+    if (nativeMpv.hasNativeMpv) {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        const isFs = await win.isFullscreen();
+        // Mark the toggle BEFORE the call so the onResized listener skips
+        // the resizes it triggers (it would otherwise read a stale
+        // isFullscreen() and revert the flag below).
+        fsToggledAtRef.current = Date.now();
+        await win.setFullscreen(!isFs);
+        fsToggledAtRef.current = Date.now();
+        // Optimistic — the resize-listener effect below will reconcile
+        // the flag on the next frame via `win.isFullscreen()`, but
+        // flipping it here avoids a one-frame flash of the clamped
+        // 72rem stage while the OS animation is still unfolding.
+        setIsTauriFullscreen(!isFs);
+      } catch (e) {
+        console.warn("[Player] setFullscreen failed", e);
+      }
+      return;
+    }
     const el = containerRef.current;
     if (!el) return;
     if (document.fullscreenElement) document.exitFullscreen();
@@ -799,22 +1244,55 @@ export default function Player() {
   };
 
   const seekBy = (delta: number) => {
+    if (!isVod) return;
+    // Native path: position/duration live in mpv, mirrored into
+    // nativeTimeRef by the state poll. Seeking the `<video>` element
+    // would do nothing (it has no media attached).
+    if (nativeMpv.hasNativeMpv) {
+      const { position, duration: dur } = nativeTimeRef.current;
+      if (!(dur > 0)) return;
+      const next = Math.max(0, Math.min(dur - 1, position + delta));
+      void nativeMpv.seek(next);
+      nativeTimeRef.current = { position: next, duration: dur };
+      setCurrentTime(next);
+      return;
+    }
     const v = videoRef.current;
-    if (!v || !isVod) return;
+    if (!v) return;
     const next = Math.max(0, Math.min((v.duration || 0) - 1, v.currentTime + delta));
     v.currentTime = next;
     setCurrentTime(next);
   };
 
   const seekTo = (ratio: number) => {
+    if (!isVod) return;
+    if (nativeMpv.hasNativeMpv) {
+      const { duration: dur } = nativeTimeRef.current;
+      if (!(dur > 0)) return;
+      const t = Math.max(0, Math.min(dur, dur * ratio));
+      void nativeMpv.seek(t);
+      nativeTimeRef.current = { position: t, duration: dur };
+      setCurrentTime(t);
+      return;
+    }
     const v = videoRef.current;
-    if (!v || !isVod || !Number.isFinite(v.duration)) return;
+    if (!v || !Number.isFinite(v.duration)) return;
     const t = Math.max(0, Math.min(v.duration, v.duration * ratio));
     v.currentTime = t;
     setCurrentTime(t);
   };
 
   const selectAudio = (id: number) => {
+    // Native path: `id` is an mpv track id, straight into `aid`. This is
+    // the dual-audio case that motivated the whole libmpv pivot — hls.js
+    // / mpegts.js inside WebView2 never exposed the second audio track on
+    // the providers we use.
+    if (nativeMpv.hasNativeMpv) {
+      void nativeMpv.setAudioTrack(id);
+      setCurrentAudio(id);
+      setMenu(null);
+      return;
+    }
     if (hlsRef.current) {
       hlsRef.current.audioTrack = id;
     } else {
@@ -828,6 +1306,14 @@ export default function Player() {
   };
 
   const selectSubtitle = (id: number) => {
+    // Native path: negative id means "off" (`sid=no`) — matches the
+    // convention the menu already uses for the WebView engines.
+    if (nativeMpv.hasNativeMpv) {
+      void nativeMpv.setSubtitleTrack(id >= 0 ? id : null);
+      setCurrentSubtitle(id);
+      setMenu(null);
+      return;
+    }
     if (hlsRef.current) {
       hlsRef.current.subtitleTrack = id;
       hlsRef.current.subtitleDisplay = id >= 0;
@@ -852,18 +1338,6 @@ export default function Player() {
   };
 
   const retry = () => setAttemptCount((a) => a + 1);
-
-  const handleOpenMpv = async () => {
-    if (!playback) return;
-    setMpvError(null);
-    try {
-      // pause in-app player before handing off
-      videoRef.current?.pause();
-      await openInMpv(playback.url, playback.title);
-    } catch (e) {
-      setMpvError(e instanceof Error ? e.message : String(e));
-    }
-  };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     resetHideTimer();
@@ -914,14 +1388,22 @@ export default function Player() {
 
   const audioDisabled = audioTracks.length <= 1;
   const subsDisabled = subtitleTracks.length === 0;
+  // Any floating panel on screen? Used to carve a strip out of the mpv
+  // popup on the right so the panel is actually visible (see the video
+  // area's `right` inset below).
+  const overlayPanelOpen = menu !== null || nextPromptVisible;
 
   return (
     <div
       // `player-wrapper` opts into the dynamic-viewport-height + safe-area
       // padding rules in index.css so the player adapts when Chrome's URL
       // bar slides in/out and never sits under the system gesture / status
-      // bars.
-      className="player-wrapper fixed inset-0 z-50 bg-black/95 flex items-center justify-center p-1 sm:p-6"
+      // bars. In OS-fullscreen (native-mpv path) we drop the wrapper padding
+      // and the stage's max-width / 16:9 clamp so the video actually fills
+      // the screen — otherwise the stage stays a 1152px island.
+      className={`player-wrapper fixed inset-0 z-50 bg-black/95 flex items-center justify-center ${
+        isTauriFullscreen ? "p-0" : "p-1 sm:p-6"
+      }`}
       onKeyDown={onKeyDown}
       onMouseMove={resetHideTimer}
       // Touch support: tapping the screen reveals the controls (mobile has
@@ -952,10 +1434,37 @@ export default function Player() {
       <div
         ref={containerRef}
         className={`player-stage relative bg-black overflow-hidden shadow-2xl ${
-          !controlsVisible ? "cursor-none" : ""
-        }`}
+          isTauriFullscreen ? "player-stage-fs" : ""
+        } ${!controlsVisible ? "cursor-none" : ""}`}
         onMouseMove={resetHideTimer}
       >
+        {/* Dedicated video area the native-mpv popup is pinned to. On
+            Windows the plugin paints into a top-level HWND that the OS
+            composites above WebView2 (DirectComposition won't let in-
+            window Z-order lift us over WebView), so wherever this div
+            sits is wherever the video sits. When controls are visible
+            we inset the area by TOP_BAR_H / BOTTOM_BAR_H so the React
+            overlays above are drawn in strips the HWND no longer covers.
+            On the web / WebView engines the inline <video> fills this
+            box and the overlays naturally sit on top via CSS Z-order —
+            the inset is a no-op there. */}
+        <div
+          ref={videoAreaRef}
+          className="absolute left-0 bg-black transition-[top,bottom,right] duration-200 ease-out"
+          style={{
+            top: nativeMpv.hasNativeMpv && controlsVisible ? "72px" : 0,
+            bottom: nativeMpv.hasNativeMpv && controlsVisible ? "96px" : 0,
+            // Floating panels (audio / subtitle / brightness / speed
+            // menus, next-episode prompt) are positioned `right-4
+            // bottom-24` INSIDE the stage — i.e. squarely inside the
+            // rect the mpv popup covers, where the OS composites them
+            // away and the user sees nothing happen on click. Pull the
+            // video area in from the right while one is open so the
+            // panel lands on a strip the popup no longer owns. 352px
+            // clears the widest one (w-80 + right-4).
+            right: nativeMpv.hasNativeMpv && overlayPanelOpen ? "352px" : 0,
+          }}
+        >
         <video
           ref={videoRef}
           className="w-full h-full bg-black"
@@ -1021,6 +1530,7 @@ export default function Player() {
           }}
           onClick={togglePlay}
         />
+        </div>
 
         {loading && !error && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -1094,40 +1604,25 @@ export default function Player() {
               </div>
             )}
           </div>
-          {/* mpv handoff and URL copy are desktop-only — the web build has no
-              local mpv install and the URL would be useless to most users. */}
+          {/* URL copy is desktop-only — the web build serves everything
+              through the /proxy/ layer so the raw upstream URL would be
+              meaningless to most users. The external-mpv handoff button
+              that used to live here was removed once the native libmpv
+              engine took over on Windows. */}
           {IS_TAURI && (
-            <>
-              <button
-                onClick={handleOpenMpv}
-                disabled={mpvAvailable === false}
-                className="btn-ghost"
-                title={mpvAvailable === false ? t("player.mpvNotFound") : t("player.openMpvHint")}
-                aria-label={t("player.openMpv")}
-              >
-                <IconExternal />
-                <span className="hidden md:inline">mpv</span>
-              </button>
-              <button
-                onClick={copyUrl}
-                className="btn-ghost"
-                title={t("player.copyUrl")}
-                aria-label={t("player.copyUrl")}
-              >
-                {copied ? <IconCheck /> : <IconCopy />}
-              </button>
-            </>
+            <button
+              onClick={copyUrl}
+              className="btn-ghost"
+              title={t("player.copyUrl")}
+              aria-label={t("player.copyUrl")}
+            >
+              {copied ? <IconCheck /> : <IconCopy />}
+            </button>
           )}
           <button onClick={stop} className="btn-ghost" aria-label={t("player.close")}>
             <IconClose />
           </button>
         </div>
-        {mpvError && (
-          <div className="absolute top-20 right-4 z-20 bg-red-500/20 border border-red-400/30 rounded-lg px-3 py-2 text-xs text-red-200 max-w-xs">
-            {mpvError}
-          </div>
-        )}
-
         {(menu === "audio" || menu === "sub") && (
           <TrackMenu
             title={menu === "audio" ? t("player.audioMenu") : t("player.subMenu")}
@@ -1363,14 +1858,20 @@ export default function Player() {
               <IconBrightness />
             </button>
 
-            <button
-              onClick={togglePip}
-              className={`btn-ghost ${isPip ? "!text-accent" : ""}`}
-              aria-label="Picture-in-Picture"
-              title="Picture-in-Picture"
-            >
-              <IconPip />
-            </button>
+            {/* Picture-in-Picture is a `<video>` element feature. On the
+                native path the element has no media attached (mpv paints
+                into its own HWND), so the button would open an empty PiP
+                window — hide it instead of shipping a dead control. */}
+            {!nativeMpv.hasNativeMpv && (
+              <button
+                onClick={togglePip}
+                className={`btn-ghost ${isPip ? "!text-accent" : ""}`}
+                aria-label="Picture-in-Picture"
+                title="Picture-in-Picture"
+              >
+                <IconPip />
+              </button>
+            )}
 
             <button onClick={toggleFullscreen} className="btn-ghost" aria-label="Tela cheia" title="Tela cheia (F)">
               <IconFullscreen />

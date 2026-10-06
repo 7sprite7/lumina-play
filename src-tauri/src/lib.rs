@@ -107,11 +107,28 @@ fn open_in_mpv(url: String, title: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // Route `log` crate calls (used by tauri-plugin-lumina-mpv and future
+    // native code) to stderr. Picked up by `tauri dev` in the console and
+    // by Windows debugger output in a release build.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,lumina_mpv=debug"),
+    )
+    .is_test(false)
+    .try_init();
+
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_fs::init());
+
+    // Native libmpv engine — Windows only. On Linux / macOS the plugin
+    // crate isn't compiled (see Cargo.toml target.cfg) and the frontend
+    // falls back to mpegts.js / hls.js via the existing IS_TAURI branch.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_lumina_mpv::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             find_mpv,
             is_mpv_installed,

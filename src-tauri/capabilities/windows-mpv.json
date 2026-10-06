@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/windows-schema.json",
+  "identifier": "windows-mpv",
+  "description": "Native libmpv engine commands — Windows only. Non-Windows targets don't compile the tauri-plugin-lumina-mpv crate, so this capability is scoped to that platform to avoid Linux / macOS build errors on missing permission identifiers.",
+  "platforms": ["windows"],
+  "windows": ["main"],
+  "permissions": [
+    "lumina-mpv:default"
+  ]
+}

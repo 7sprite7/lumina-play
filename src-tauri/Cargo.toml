@@ -1,6 +1,6 @@
 [package]
 name = "lumina-play"
-version = "0.1.10"
+version = "0.2.0"
 description = "Lumina Play — modern IPTV player"
 authors = ["Jer"]
 edition = "2021"
@@ -20,3 +20,9 @@ tauri-plugin-http = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+env_logger = "0.11"
+
+# Windows-only: native libmpv engine. Branch desktop/native-player; see
+# tauri-plugin-lumina-mpv/README.md for scope and milestones.
+[target.'cfg(target_os = "windows")'.dependencies]
+tauri-plugin-lumina-mpv = { path = "./tauri-plugin-lumina-mpv" }

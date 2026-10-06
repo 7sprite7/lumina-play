@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-raise-viewport"
+description = "Enables the raise_viewport command without any pre-configured scope."
+commands.allow = ["raise_viewport"]
+
+[[permission]]
+identifier = "deny-raise-viewport"
+description = "Denies the raise_viewport command without any pre-configured scope."
+commands.deny = ["raise_viewport"]

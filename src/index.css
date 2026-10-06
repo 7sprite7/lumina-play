@@ -172,6 +172,18 @@
   }
 }
 
+/* OS-fullscreen override (native-mpv Tauri path). Beats the desktop
+   clamp above so the stage truly fills the screen when the user
+   fullscreens the window. */
+.player-stage.player-stage-fs,
+.player-stage.player-stage-fs:where(:not(#\9)) {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  border-radius: 0;
+}
+
 /* Mobile-only fixed close button. Hidden by default; revealed only on
    touch devices (phones, tablets) via the `(hover: none) and
    (pointer: coarse)` media query — that's the standard way to detect

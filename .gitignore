@@ -21,6 +21,10 @@ src-tauri/Cargo.lock
 # mpv sidecar (large binary, ~115MB)
 src-tauri/binaries/mpv*.exe
 
+# libmpv runtime (fetched by scripts/download-libmpv.ps1)
+src-tauri/binaries/libmpv*.dll
+src-tauri/binaries/lib/
+
 # Local env
 .env
 .env.local

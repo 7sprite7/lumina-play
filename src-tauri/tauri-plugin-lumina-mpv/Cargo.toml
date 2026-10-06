@@ -1,0 +1,38 @@
+[package]
+name = "tauri-plugin-lumina-mpv"
+version = "0.1.0"
+edition = "2021"
+description = "Native libmpv embed plugin for Lúmina Play desktop"
+authors = ["Jer"]
+license = "MIT"
+# Required by tauri-plugin's build helper so permission identifiers get
+# namespaced (`lumina-mpv:allow-play` etc.) and the main app's capability
+# file can reference them.
+links = "tauri-plugin-lumina-mpv"
+
+[dependencies]
+tauri = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+thiserror = "1"
+
+# libmpv2 wraps libmpv-2.dll. The crate links against the import library
+# `libmpv.dll.a` placed by scripts/download-libmpv.ps1 at
+# src-tauri/binaries/lib/ — see build.rs below for the search path setup.
+#
+# The `windows` crate gives us CreateWindowExW / SetWindowPos for M2b, where
+# we spawn a dedicated child HWND inside the main Tauri window so mpv's
+# render target stops losing the Z-order fight against WebView2. We take
+# only the handful of modules we need to keep the compile times sane.
+[target.'cfg(target_os = "windows")'.dependencies]
+libmpv2 = "6"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",         # ClientToScreen
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
