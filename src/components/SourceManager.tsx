@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useAppStore } from "../store";
-import { useT } from "../lib/i18n";
+import { useLanguage, useT } from "../lib/i18n";
+import { sourceDisclaimer } from "../lib/terms";
 import { IconClose, IconPlus, IconTrash } from "./icons";
 import type { M3USource, Source, XtreamSource } from "../types";
 
@@ -22,6 +23,7 @@ export default function SourceManager({ onClose }: Props) {
   const updateSource = useAppStore((s) => s.updateSource);
   const setActiveSource = useAppStore((s) => s.setActiveSource);
   const t = useT();
+  const language = useLanguage();
 
   const [mode, setMode] = useState<Mode>("list");
   const [editing, setEditing] = useState<Source | null>(null);
@@ -44,7 +46,10 @@ export default function SourceManager({ onClose }: Props) {
           </button>
         )}
 
-        <h2 className="text-xl font-semibold mb-4">{t("settings.manageTitle")}</h2>
+        <h2 className="text-xl font-semibold mb-1">{t("settings.manageTitle")}</h2>
+        {/* Where sources get added is where it matters most to say it:
+            the app brings no content of its own. */}
+        <p className="text-xs text-slate-400 mb-4">{sourceDisclaimer(language)}</p>
 
         {mode === "list" && (
           <>

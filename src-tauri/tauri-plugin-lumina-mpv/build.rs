@@ -14,6 +14,7 @@ const COMMANDS: &[&str] = &[
     "set_volume",
     "set_mute",
     "set_brightness",
+    "set_cursor_hidden",
     "set_viewport",
     "hide_viewport",
     "raise_viewport",

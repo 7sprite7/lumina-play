@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-cursor-hidden"
+description = "Enables the set_cursor_hidden command without any pre-configured scope."
+commands.allow = ["set_cursor_hidden"]
+
+[[permission]]
+identifier = "deny-set-cursor-hidden"
+description = "Denies the set_cursor_hidden command without any pre-configured scope."
+commands.deny = ["set_cursor_hidden"]

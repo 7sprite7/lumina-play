@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{
     plugin::{Builder, TauriPlugin},
-    Manager, Runtime,
+    Emitter, Manager, Runtime,
 };
 
 #[cfg(target_os = "windows")]
@@ -21,10 +21,11 @@ use windows::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::Gdi::ClientToScreen,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW,
-            SetWindowPos, HMENU, HTTRANSPARENT, HWND_TOP, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOSIZE, WM_NCHITTEST, WNDCLASSEXW, WS_EX_NOACTIVATE,
-            WS_POPUP, WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, LoadCursorW,
+            RegisterClassExW, SetCursor, SetWindowPos, WindowFromPoint, CS_DBLCLKS, HMENU,
+            HWND_TOP, IDC_ARROW, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+            WM_SETCURSOR, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_POPUP, WS_VISIBLE,
         },
     },
 };
@@ -82,6 +83,10 @@ struct MpvEngine {
     // the follow-the-window behaviour. One-shot flag to avoid stacking
     // multiple listeners if `play()` is invoked repeatedly.
     listener_installed: Mutex<bool>,
+    // Where libmpv writes its own log. mpv's log is the one that explains
+    // a playback freeze (which demuxer, which segment, which HTTP error);
+    // without it, a "the channel froze" report has nothing to go on.
+    log_file: Option<std::path::PathBuf>,
 }
 
 #[cfg(target_os = "windows")]
@@ -109,16 +114,43 @@ impl Drop for MpvEngine {
     }
 }
 
-/// Window procedure for our popup HWND. We only need to override one
-/// message: WM_NCHITTEST. Returning `HTTRANSPARENT` tells Windows "this
-/// window should be ignored for mouse hit-testing" — the OS then re-runs
-/// the hit-test on the window immediately beneath us (the Tauri main
-/// window hosting WebView2). That means mouse-move, click, scroll and
-/// cursor-over events ALL pass straight through the mpv surface and
-/// reach React, so the controls-autohide timer resets normally when the
-/// user wiggles the mouse over the "video" area, and `onClick={togglePlay}`
-/// on `<video>` still works. Everything else (paint, resize, destroy)
-/// still goes to DefWindowProc so mpv's render path is unaffected.
+// ----------- mouse input over the video -----------
+//
+// The mpv popup is a top-level window sitting on top of the WebView. It
+// used to answer WM_NCHITTEST with HTTRANSPARENT so the mouse would "fall
+// through" to React — but HTTRANSPARENT only redirects to windows on the
+// SAME thread, and WebView2's input window lives in another process. In
+// a window that was never noticed: the stage had margins the mouse could
+// reach. Once fullscreen became truly full there was no margin left, and
+// after the controls auto-hid nothing could bring them back.
+//
+// So the popup now takes the mouse itself and forwards what matters to
+// the frontend as `lumina-mpv://input` events: move (reveal controls),
+// click (play/pause), dblclick (fullscreen) and wheel (volume).
+
+#[cfg(target_os = "windows")]
+static INPUT_SINK: std::sync::OnceLock<Box<dyn Fn(&'static str) + Send + Sync>> =
+    std::sync::OnceLock::new();
+/// Mirrors the controls' visibility: hide the arrow over the video when
+/// the controls are hidden, the way any video player does.
+#[cfg(target_os = "windows")]
+static CURSOR_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static LAST_CURSOR: Mutex<(i32, i32)> = Mutex::new((i32::MIN, i32::MIN));
+#[cfg(target_os = "windows")]
+static LAST_MOVE_SENT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// A double click arrives as UP, DBLCLK, UP: the second UP must not
+/// count as a click, or a double click would also toggle play.
+#[cfg(target_os = "windows")]
+static SWALLOW_NEXT_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+fn send_input(kind: &'static str) {
+    if let Some(sink) = INPUT_SINK.get() {
+        sink(kind);
+    }
+}
+
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn host_wnd_proc(
     hwnd: HWND,
@@ -126,8 +158,69 @@ unsafe extern "system" fn host_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_NCHITTEST {
-        return LRESULT(HTTRANSPARENT as isize);
+    use std::sync::atomic::Ordering;
+    match msg {
+        // Never take focus from the main window: keyboard shortcuts (Esc,
+        // space, arrows) are handled by React and must keep working after
+        // a click on the video.
+        WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEMOVE => {
+            // Windows also synthesises WM_MOUSEMOVE when the window MOVES
+            // under a still cursor — and the popup resizes every time the
+            // controls show or hide. Only a real change of cursor position
+            // counts, or that would loop the controls on forever.
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_ok() {
+                let moved = LAST_CURSOR
+                    .lock()
+                    .map(|mut last| {
+                        let changed = *last != (pt.x, pt.y);
+                        *last = (pt.x, pt.y);
+                        changed
+                    })
+                    .unwrap_or(false);
+                if moved {
+                    // Throttled: one event per ~100ms is plenty to keep the
+                    // auto-hide timer alive.
+                    let due = LAST_MOVE_SENT
+                        .lock()
+                        .map(|mut t| {
+                            let now = std::time::Instant::now();
+                            let due = t.map_or(true, |p| now.duration_since(p).as_millis() >= 100);
+                            if due {
+                                *t = Some(now);
+                            }
+                            due
+                        })
+                        .unwrap_or(true);
+                    if due {
+                        send_input("move");
+                    }
+                }
+            }
+            return LRESULT(0);
+        }
+        WM_LBUTTONUP => {
+            if !SWALLOW_NEXT_UP.swap(false, Ordering::Relaxed) {
+                send_input("click");
+            }
+            return LRESULT(0);
+        }
+        WM_LBUTTONDBLCLK => {
+            SWALLOW_NEXT_UP.store(true, Ordering::Relaxed);
+            send_input("dblclick");
+            return LRESULT(0);
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16;
+            send_input(if delta > 0 { "wheel-up" } else { "wheel-down" });
+            return LRESULT(0);
+        }
+        WM_SETCURSOR if CURSOR_HIDDEN.load(Ordering::Relaxed) => {
+            let _ = SetCursor(None);
+            return LRESULT(1);
+        }
+        _ => {}
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
@@ -153,7 +246,12 @@ fn ensure_window_class() -> Result<PCWSTR, String> {
     REGISTERED.call_once(|| unsafe {
         let cls = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            // CS_DBLCLKS: without it Windows never sends WM_LBUTTONDBLCLK.
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(host_wnd_proc),
+            // The popup now receives the mouse, so it needs a cursor of its
+            // own — NULL would leave whatever shape was last drawn.
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             lpszClassName: w!("LuminaMpvHost"),
             ..Default::default()
         };
@@ -179,13 +277,14 @@ fn ensure_window_class() -> Result<PCWSTR, String> {
 
 #[cfg(target_os = "windows")]
 impl MpvEngine {
-    fn new() -> Self {
+    fn new(log_file: Option<std::path::PathBuf>) -> Self {
         Self {
             mpv: Mutex::new(None),
             child_hwnd: Mutex::new(None),
             last_viewport: Mutex::new(None),
             last_url: Mutex::new(None),
             listener_installed: Mutex::new(false),
+            log_file,
         }
     }
 
@@ -216,13 +315,9 @@ impl MpvEngine {
         // separate top-level window has its own desktop surface and sits
         // above its owner naturally.
         //
-        // Custom "LuminaMpvHost" class whose WNDPROC returns HTTRANSPARENT
-        // on WM_NCHITTEST — see host_wnd_proc above. This is what lets
-        // mouse events (move, click, scroll) pass through the mpv popup
-        // and reach the React controls on the WebView beneath, so the
-        // auto-hide bar wakes up on cursor wiggle like on any normal
-        // video player. STATIC worked for pure painting but ate every
-        // pointer event that landed on the popup.
+        // Custom "LuminaMpvHost" class: its WNDPROC (host_wnd_proc above)
+        // takes the mouse over the video and forwards it to the frontend
+        // as events, since the WebView beneath can't receive it directly.
         let class_name = ensure_window_class()?;
         let child = unsafe {
             CreateWindowExW(
@@ -243,6 +338,10 @@ impl MpvEngine {
         .map_err(|e| format!("CreateWindowExW: {e:?}"))?;
 
         let child_raw = child.0 as isize;
+        let log_path = self
+            .log_file
+            .as_ref()
+            .map(|p| p.display().to_string());
         log::info!(
             "[lumina-mpv] created popup HWND {child_raw:#x} owned by {parent_hwnd_raw:#x}"
         );
@@ -293,6 +392,11 @@ impl MpvEngine {
 
                 init.set_option("terminal", "yes")?;
                 init.set_option("msg-level", "all=v")?;
+                // mpv truncates its log-file on open; the previous
+                // session's copy was already rotated aside in setup().
+                if let Some(path) = log_path.as_deref() {
+                    init.set_option("log-file", path)?;
+                }
 
                 Ok(())
             })
@@ -766,6 +870,38 @@ async fn hide_viewport<R: Runtime>(
     .await
 }
 
+/// Hides or shows the mouse cursor over the video, in step with the
+/// player controls. WM_SETCURSOR only fires on the next mouse move, so
+/// when hiding we also clear the cursor right away if it is already over
+/// the video (controls auto-hide while the mouse is still).
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn set_cursor_hidden<R: Runtime>(
+    state: tauri::State<'_, MpvEngine>,
+    window: tauri::Window<R>,
+    hidden: bool,
+) -> Result<(), String> {
+    CURSOR_HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
+    let child = match state.child_hwnd.lock().ok().and_then(|g| *g) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+    on_main(&window, move || {
+        unsafe {
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_ok() && WindowFromPoint(pt).0 as isize == child {
+                if hidden {
+                    let _ = SetCursor(None);
+                } else if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    let _ = SetCursor(Some(arrow));
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
 // ----------- M4: tracks + state -----------
 
 /// Read `track-list` through its indexed sub-properties.
@@ -932,6 +1068,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             set_volume,
             set_mute,
             set_brightness,
+            set_cursor_hidden,
             set_viewport,
             hide_viewport,
             raise_viewport,
@@ -941,7 +1078,25 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             get_state,
         ])
         .setup(|app, _api| {
-            app.manage(MpvEngine::new());
+            // Same folder as the app's own log, so the diagnostics export
+            // picks both up. Keep the previous session's mpv log: after a
+            // crash the user reopens the app, and mpv truncates on open.
+            let log_file = app.path().app_log_dir().ok().map(|dir| {
+                let _ = std::fs::create_dir_all(&dir);
+                let current = dir.join("mpv.log");
+                if current.exists() {
+                    let _ = std::fs::rename(&current, dir.join("mpv.prev.log"));
+                }
+                current
+            });
+            app.manage(MpvEngine::new(log_file));
+            // Mouse events over the video reach the frontend through here
+            // (see host_wnd_proc). The WNDPROC is a plain function with no
+            // access to the app, hence a process-wide sink.
+            let handle = app.clone();
+            let _ = INPUT_SINK.set(Box::new(move |kind| {
+                let _ = handle.emit("lumina-mpv://input", kind);
+            }));
             log::info!("[lumina-mpv] plugin loaded (M1 — libmpv2 with_initializer)");
             Ok(())
         })

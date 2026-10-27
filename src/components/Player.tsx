@@ -6,6 +6,12 @@ import { useAppStore, findEpisodeNeighbors } from "../store";
 import { selectEngine, type Engine } from "../lib/playback-engine";
 import { IS_TAURI } from "../lib/platform";
 import * as nativeMpv from "../lib/native-mpv";
+import {
+  enterMiniPlayer,
+  exitMiniPlayer,
+  isMiniPlayerActive,
+  MINI_STRIP_H,
+} from "../lib/mini-player";
 import { proxify } from "../lib/proxy";
 import { useT } from "../lib/i18n";
 import {
@@ -128,6 +134,10 @@ export default function Player() {
   // uses it to stay out of the way while the OS transition is in flight —
   // see the fullscreen-sync effect below.
   const fsToggledAtRef = useRef(0);
+  // Native-path picture-in-picture: the whole app window shrinks into a
+  // corner mini player (see lib/mini-player.ts for why it can't be the
+  // browser PiP API here).
+  const [miniPlayer, setMiniPlayer] = useState(false);
 
   // Mirrors of the audio/rate state for the native-mpv path. `load()` is a
   // useCallback with a tiny dep list (so a volume nudge never re-creates
@@ -350,7 +360,7 @@ export default function Player() {
             const area = videoAreaRef.current ?? containerRef.current;
             if (area) {
               const r = area.getBoundingClientRect();
-              void nativeMpv.setViewport(r.left, r.top, r.width, r.height);
+              nativeMpv.setViewport(r.left, r.top, r.width, r.height).catch(() => {});
             }
             // Same race for the audio/rate properties: the effects that
             // watch `volume` / `muted` / `playbackSpeed` run on mount,
@@ -822,7 +832,7 @@ export default function Player() {
 
     const push = () => {
       const r = area.getBoundingClientRect();
-      void nativeMpv.setViewport(r.left, r.top, r.width, r.height);
+      nativeMpv.setViewport(r.left, r.top, r.width, r.height).catch(() => {});
     };
     push();
 
@@ -970,11 +980,18 @@ export default function Player() {
       if (Date.now() - mountedAt < 500) return;
       void (async () => {
         try {
+          // Closing from the mini player: give the window back its size,
+          // place and frame — but not fullscreen, which over the catalogue
+          // would be wrong.
+          if (isMiniPlayerActive()) {
+            await exitMiniPlayer(false);
+            return;
+          }
           const { getCurrentWindow } = await import("@tauri-apps/api/window");
           const win = getCurrentWindow();
           if (await win.isFullscreen()) await win.setFullscreen(false);
         } catch (e) {
-          console.warn("[Player] exit fullscreen on close failed", e);
+          console.warn("[Player] restoring the window on close failed", e);
         }
       })();
     };
@@ -1170,6 +1187,78 @@ export default function Player() {
     };
   }, [engineUsed, playback]);
 
+  // ---- native-mpv: mouse over the video ----
+  //
+  // The video is a separate top-level window above the WebView, so React
+  // never sees the mouse over it. The plugin captures it there and
+  // forwards it (see host_wnd_proc in the plugin). Without this, once the
+  // controls auto-hid in true fullscreen nothing could bring them back.
+  //
+  // Subscribed once; the handlers it calls are refreshed every render
+  // through this ref, because most of them are defined below the early
+  // return (and so can't be hook dependencies).
+  const nativeInputRef = useRef<{
+    reveal: () => void;
+    click: () => void;
+    doubleClick: () => void;
+    wheel: (up: boolean) => void;
+  } | null>(null);
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    // Single click waits briefly so a double click (fullscreen) doesn't
+    // also toggle play/pause on its first click.
+    let clickTimer: number | null = null;
+    void nativeMpv
+      .onNativeInput((kind) => {
+        const h = nativeInputRef.current;
+        if (!h) return;
+        if (kind === "move") {
+          h.reveal();
+        } else if (kind === "click") {
+          h.reveal();
+          if (clickTimer) window.clearTimeout(clickTimer);
+          clickTimer = window.setTimeout(() => {
+            clickTimer = null;
+            h.click();
+          }, 250);
+        } else if (kind === "dblclick") {
+          if (clickTimer) {
+            window.clearTimeout(clickTimer);
+            clickTimer = null;
+          }
+          h.doubleClick();
+        } else {
+          h.reveal();
+          h.wheel(kind === "wheel-up");
+        }
+      })
+      .then((u) => {
+        if (cancelled) u();
+        else unlisten = u;
+      });
+    return () => {
+      cancelled = true;
+      if (clickTimer) window.clearTimeout(clickTimer);
+      unlisten?.();
+    };
+  }, []);
+
+  // Cursor over the video follows the controls: gone while they're
+  // hidden, back as soon as they appear. Never hidden in the mini player,
+  // where the controls never hide either.
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv) return;
+    nativeMpv.setCursorHidden(!controlsVisible && !miniPlayer).catch(() => {});
+  }, [controlsVisible, miniPlayer]);
+  useEffect(() => {
+    if (!nativeMpv.hasNativeMpv) return;
+    return () => {
+      nativeMpv.setCursorHidden(false).catch(() => {});
+    };
+  }, []);
+
   if (!playback) return null;
 
   const togglePlay = () => {
@@ -1179,10 +1268,10 @@ export default function Player() {
     // updates without waiting on an event round-trip.
     if (nativeMpv.hasNativeMpv) {
       if (playing) {
-        void nativeMpv.pause();
+        nativeMpv.pause().catch(() => {});
         setPlaying(false);
       } else {
-        void nativeMpv.resume();
+        nativeMpv.resume().catch(() => {});
         setPlaying(true);
       }
       return;
@@ -1204,6 +1293,25 @@ export default function Player() {
       }
     } catch (e) {
       console.error("PiP error", e);
+    }
+  };
+
+  const toggleMiniPlayer = async () => {
+    try {
+      if (miniPlayer) {
+        await exitMiniPlayer();
+        setMiniPlayer(false);
+      } else {
+        // Suppress the resize listener's fullscreen reconciliation while
+        // the window is being reshaped — same reason as toggleFullscreen.
+        fsToggledAtRef.current = Date.now();
+        await enterMiniPlayer();
+        fsToggledAtRef.current = Date.now();
+        setIsTauriFullscreen(false);
+        setMiniPlayer(true);
+      }
+    } catch (e) {
+      console.warn("[Player] mini player toggle failed", e);
     }
   };
 
@@ -1243,6 +1351,20 @@ export default function Player() {
     else el.requestFullscreen();
   };
 
+  // Refreshed every render so the once-subscribed native mouse listener
+  // (above the early return) always calls the current closures.
+  nativeInputRef.current = {
+    reveal: resetHideTimer,
+    click: () => void togglePlay(),
+    // Double click = fullscreen, as in any desktop video player; in the
+    // mini player it means "back to the normal window".
+    doubleClick: () => void (miniPlayer ? toggleMiniPlayer() : toggleFullscreen()),
+    wheel: (up) => {
+      setVolume((v) => Math.max(0, Math.min(1, +(v + (up ? 0.05 : -0.05)).toFixed(2))));
+      setMuted(false);
+    },
+  };
+
   const seekBy = (delta: number) => {
     if (!isVod) return;
     // Native path: position/duration live in mpv, mirrored into
@@ -1252,7 +1374,7 @@ export default function Player() {
       const { position, duration: dur } = nativeTimeRef.current;
       if (!(dur > 0)) return;
       const next = Math.max(0, Math.min(dur - 1, position + delta));
-      void nativeMpv.seek(next);
+      nativeMpv.seek(next).catch(() => {});
       nativeTimeRef.current = { position: next, duration: dur };
       setCurrentTime(next);
       return;
@@ -1270,7 +1392,7 @@ export default function Player() {
       const { duration: dur } = nativeTimeRef.current;
       if (!(dur > 0)) return;
       const t = Math.max(0, Math.min(dur, dur * ratio));
-      void nativeMpv.seek(t);
+      nativeMpv.seek(t).catch(() => {});
       nativeTimeRef.current = { position: t, duration: dur };
       setCurrentTime(t);
       return;
@@ -1356,11 +1478,14 @@ export default function Player() {
     } else if ((e.key === "ArrowLeft" || e.key === "PageUp") && hasQueue) {
       e.preventDefault();
       prevLive();
-    } else if (e.key === "f") {
+    } else if (e.key === "f" && !miniPlayer) {
       e.preventDefault();
       toggleFullscreen();
     } else if (e.key === "Escape") {
-      stop();
+      // In the mini player Esc means "back to the full window", not "stop
+      // watching" — closing is one click away on the strip.
+      if (miniPlayer) void toggleMiniPlayer();
+      else stop();
     } else if ((e.key === "n" || e.key === "N") && isSeries && hasNextEpisode) {
       e.preventDefault();
       nextEpisodeAction();
@@ -1401,8 +1526,8 @@ export default function Player() {
       // bars. In OS-fullscreen (native-mpv path) we drop the wrapper padding
       // and the stage's max-width / 16:9 clamp so the video actually fills
       // the screen — otherwise the stage stays a 1152px island.
-      className={`player-wrapper fixed inset-0 z-50 bg-black/95 flex items-center justify-center ${
-        isTauriFullscreen ? "p-0" : "p-1 sm:p-6"
+      className={`player-wrapper fixed inset-0 z-50 flex items-center justify-center ${
+        isTauriFullscreen || miniPlayer ? "player-wrapper-fs bg-black" : "bg-black/95"
       }`}
       onKeyDown={onKeyDown}
       onMouseMove={resetHideTimer}
@@ -1434,8 +1559,8 @@ export default function Player() {
       <div
         ref={containerRef}
         className={`player-stage relative bg-black overflow-hidden shadow-2xl ${
-          isTauriFullscreen ? "player-stage-fs" : ""
-        } ${!controlsVisible ? "cursor-none" : ""}`}
+          isTauriFullscreen || miniPlayer ? "player-stage-fs" : ""
+        } ${!controlsVisible && !miniPlayer ? "cursor-none" : ""}`}
         onMouseMove={resetHideTimer}
       >
         {/* Dedicated video area the native-mpv popup is pinned to. On
@@ -1452,8 +1577,14 @@ export default function Player() {
           ref={videoAreaRef}
           className="absolute left-0 bg-black transition-[top,bottom,right] duration-200 ease-out"
           style={{
-            top: nativeMpv.hasNativeMpv && controlsVisible ? "72px" : 0,
-            bottom: nativeMpv.hasNativeMpv && controlsVisible ? "96px" : 0,
+            // Mini player: the video fills the window except the fixed
+            // control strip at the bottom — no top bar, no auto-hide.
+            top: miniPlayer ? 0 : nativeMpv.hasNativeMpv && controlsVisible ? "72px" : 0,
+            bottom: miniPlayer
+              ? `${MINI_STRIP_H}px`
+              : nativeMpv.hasNativeMpv && controlsVisible
+              ? "96px"
+              : 0,
             // Floating panels (audio / subtitle / brightness / speed
             // menus, next-episode prompt) are positioned `right-4
             // bottom-24` INSIDE the stage — i.e. squarely inside the
@@ -1462,7 +1593,7 @@ export default function Player() {
             // video area in from the right while one is open so the
             // panel lands on a strip the popup no longer owns. 352px
             // clears the widest one (w-80 + right-4).
-            right: nativeMpv.hasNativeMpv && overlayPanelOpen ? "352px" : 0,
+            right: nativeMpv.hasNativeMpv && overlayPanelOpen && !miniPlayer ? "352px" : 0,
           }}
         >
         <video
@@ -1532,6 +1663,48 @@ export default function Player() {
         />
         </div>
 
+        {miniPlayer && (
+          // Mini player strip: always visible (the video can't be
+          // overlaid, see lib/mini-player.ts) and doubling as the drag
+          // handle — the window has no title bar in this mode.
+          <div
+            data-tauri-drag-region
+            className="absolute left-0 right-0 bottom-0 flex items-center gap-1 px-2 bg-[#0b0d12] border-t border-white/5 z-20"
+            style={{ height: `${MINI_STRIP_H}px` }}
+          >
+            <button
+              onClick={togglePlay}
+              className="btn-ghost !p-1.5"
+              aria-label={playing ? "Pausar" : "Tocar"}
+              title={playing ? "Pausar" : "Tocar"}
+            >
+              {playing ? <IconPause /> : <IconPlay />}
+            </button>
+            <div
+              data-tauri-drag-region
+              className="flex-1 min-w-0 truncate text-xs text-slate-300 cursor-move select-none"
+            >
+              {playback.title}
+            </div>
+            <button
+              onClick={() => void toggleMiniPlayer()}
+              className="btn-ghost !p-1.5"
+              aria-label="Voltar à janela normal"
+              title="Voltar à janela normal (Esc)"
+            >
+              <IconFullscreen />
+            </button>
+            <button
+              onClick={stop}
+              className="btn-ghost !p-1.5"
+              aria-label={t("player.close")}
+              title={t("player.close")}
+            >
+              <IconClose />
+            </button>
+          </div>
+        )}
+
         {loading && !error && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="w-12 h-12 border-4 border-white/20 border-t-white rounded-full animate-spin" />
@@ -1568,7 +1741,7 @@ export default function Player() {
         )}
 
         <div
-          className={`absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/95 via-black/70 to-transparent flex items-start gap-3 transition-opacity duration-300 z-10 ${
+          className={`absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/95 via-black/70 to-transparent flex items-start gap-3 transition-opacity duration-300 z-10 ${miniPlayer ? "hidden" : ""} ${
             controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
         >
@@ -1681,7 +1854,7 @@ export default function Player() {
         )}
 
         <div
-          className={`player-controls-bar absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent px-4 pt-10 pb-3 transition-opacity duration-300 ${
+          className={`player-controls-bar absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent px-4 pt-10 pb-3 transition-opacity duration-300 ${miniPlayer ? "hidden" : ""} ${
             controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
         >
@@ -1858,20 +2031,18 @@ export default function Player() {
               <IconBrightness />
             </button>
 
-            {/* Picture-in-Picture is a `<video>` element feature. On the
-                native path the element has no media attached (mpv paints
-                into its own HWND), so the button would open an empty PiP
-                window — hide it instead of shipping a dead control. */}
-            {!nativeMpv.hasNativeMpv && (
-              <button
-                onClick={togglePip}
-                className={`btn-ghost ${isPip ? "!text-accent" : ""}`}
-                aria-label="Picture-in-Picture"
-                title="Picture-in-Picture"
-              >
-                <IconPip />
-              </button>
-            )}
+            {/* Picture-in-Picture. The browser API needs a <video> with
+                media in it, which the native path doesn't have (mpv paints
+                into its own window) — there the button shrinks the whole
+                app window into a corner mini player instead. */}
+            <button
+              onClick={() => void (nativeMpv.hasNativeMpv ? toggleMiniPlayer() : togglePip())}
+              className={`btn-ghost ${isPip || miniPlayer ? "!text-accent" : ""}`}
+              aria-label="Picture-in-Picture"
+              title="Picture-in-Picture"
+            >
+              <IconPip />
+            </button>
 
             <button onClick={toggleFullscreen} className="btn-ghost" aria-label="Tela cheia" title="Tela cheia (F)">
               <IconFullscreen />

@@ -13,6 +13,7 @@ Default permissions for the Lúmina Play MPV plugin — grants every command the
 - `allow-set-volume`
 - `allow-set-mute`
 - `allow-set-brightness`
+- `allow-set-cursor-hidden`
 - `allow-set-viewport`
 - `allow-hide-viewport`
 - `allow-raise-viewport`
@@ -286,6 +287,32 @@ Enables the set_brightness command without any pre-configured scope.
 <td>
 
 Denies the set_brightness command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`lumina-mpv:allow-set-cursor-hidden`
+
+</td>
+<td>
+
+Enables the set_cursor_hidden command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`lumina-mpv:deny-set-cursor-hidden`
+
+</td>
+<td>
+
+Denies the set_cursor_hidden command without any pre-configured scope.
 
 </td>
 </tr>

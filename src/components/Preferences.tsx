@@ -3,6 +3,9 @@ import { useAppStore } from "../store";
 import { useT } from "../lib/i18n";
 import type { DateFormat, Language, Theme, TimeFormat } from "../types";
 import { IconClose, IconGear, IconLock, IconUnlock } from "./icons";
+import TermsDialog from "./TermsDialog";
+import { exportDiagnostics, openLogDir } from "../lib/diagnostics";
+import { IS_TAURI } from "../lib/platform";
 
 interface Props {
   onClose?: () => void;
@@ -12,6 +15,14 @@ export default function Preferences({ onClose }: Props) {
   const t = useT();
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const pt = settings.language !== "en";
+  const [showTerms, setShowTerms] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportedTo, setExportedTo] = useState<string | null>(null);
+
+  if (showTerms) {
+    return <TermsDialog mode="view" onClose={() => setShowTerms(false)} />;
+  }
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
@@ -100,6 +111,54 @@ export default function Preferences({ onClose }: Props) {
               {t("settings.adultPin")}
             </h3>
             <PinSection />
+          </div>
+
+          {IS_TAURI && (
+            <div className="pt-4 mt-2 border-t border-white/5">
+              <h3 className="text-sm font-semibold mb-1 text-slate-200">
+                {pt ? "Diagnóstico" : "Diagnostics"}
+              </h3>
+              <p className="text-xs text-slate-400 mb-2">
+                {pt
+                  ? "Se o app travar ou fechar sozinho, exporte o diagnóstico e envie o arquivo para o suporte. Usuários e senhas das suas listas são removidos."
+                  : "If the app freezes or closes on its own, export the diagnostics and send the file to support. Your lists' usernames and passwords are removed."}
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  className="btn-primary !text-xs"
+                  disabled={exporting}
+                  onClick={async () => {
+                    setExporting(true);
+                    try {
+                      setExportedTo(await exportDiagnostics());
+                    } catch (e) {
+                      setExportedTo(String(e));
+                    } finally {
+                      setExporting(false);
+                    }
+                  }}
+                >
+                  {exporting
+                    ? pt ? "Exportando…" : "Exporting…"
+                    : pt ? "Exportar diagnóstico" : "Export diagnostics"}
+                </button>
+                <button className="btn-ghost !text-xs" onClick={() => void openLogDir()}>
+                  {pt ? "Abrir pasta de logs" : "Open log folder"}
+                </button>
+              </div>
+              {exportedTo && (
+                <p className="text-xs text-slate-400 break-all mt-2">{exportedTo}</p>
+              )}
+            </div>
+          )}
+
+          <div className="pt-4 mt-2 border-t border-white/5">
+            <button
+              className="text-sm text-accent hover:underline"
+              onClick={() => setShowTerms(true)}
+            >
+              {pt ? "Termos de uso" : "Terms of use"}
+            </button>
           </div>
         </div>
 

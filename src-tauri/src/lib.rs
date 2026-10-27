@@ -1,3 +1,5 @@
+mod diagnostics;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -107,14 +109,11 @@ fn open_in_mpv(url: String, title: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Route `log` crate calls (used by tauri-plugin-lumina-mpv and future
-    // native code) to stderr. Picked up by `tauri dev` in the console and
-    // by Windows debugger output in a release build.
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,lumina_mpv=debug"),
-    )
-    .is_test(false)
-    .try_init();
+    // File logging + crash handlers, first thing: the earliest failures
+    // are the ones worth catching. This replaces env_logger, which wrote
+    // to stderr — and a release build on Windows has no console, so
+    // crash reports from users used to arrive with no trace at all.
+    diagnostics::init();
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -129,11 +128,27 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_lumina_mpv::init());
 
     builder
+        .setup(|app| {
+            diagnostics::spawn_ui_watchdog(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             find_mpv,
             is_mpv_installed,
             open_in_mpv,
+            diagnostics::diagnostics_status,
+            diagnostics::log_frontend,
+            diagnostics::open_log_dir,
+            diagnostics::export_diagnostics,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Only a clean exit clears the session marker; anything that
+            // skips this (crash, freeze + force close, kill) leaves it,
+            // and the next launch offers to export a report.
+            if let tauri::RunEvent::Exit = event {
+                diagnostics::end_session();
+            }
+        });
 }

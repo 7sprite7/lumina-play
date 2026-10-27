@@ -150,6 +150,16 @@
   }
 }
 
+/* OS-fullscreen: no padding at all. This has to be its own two-class
+   rule — the `p-0` utility the player used to toggle could never win:
+   these wrapper rules sit outside any @layer, after `@tailwind
+   utilities`, so at equal specificity they come later and override it.
+   The leftover 1.5rem frame (plus mpv letterboxing the slightly-too-wide
+   area) is what kept bars around "fullscreen" video. */
+.player-wrapper.player-wrapper-fs {
+  padding: 0;
+}
+
 /* Player stage: the actual video container.
    Default (touch-first) = fills the wrapper completely so phones and
    tablets get true fullscreen video. Desktop / mouse = override to a

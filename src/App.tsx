@@ -11,6 +11,9 @@ import WelcomePinDialog from "./components/WelcomePinDialog";
 import Player from "./components/Player";
 import OrientationLock from "./components/OrientationLock";
 import UpdateBanner from "./components/UpdateBanner";
+import TermsDialog from "./components/TermsDialog";
+import CrashNotice from "./components/CrashNotice";
+import { TERMS_VERSION } from "./lib/terms";
 import { useT } from "./lib/i18n";
 
 export default function App() {
@@ -23,6 +26,8 @@ export default function App() {
   const hasOnboarded = useAppStore((s) => s.settings.hasOnboarded);
   const adultPinHash = useAppStore((s) => s.settings.adultPinHash);
   const bootstrapped = useAppStore((s) => s.bootstrapped);
+  const termsAcceptedVersion = useAppStore((s) => s.settings.termsAcceptedVersion);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const t = useT();
 
   useEffect(() => {
@@ -42,6 +47,11 @@ export default function App() {
   // and hasn't set a PIN yet.
   const showWelcomePin = sources.length > 0 && !hasOnboarded && adultPinHash === null;
 
+  // Terms gate. Only once persisted settings are loaded — before that the
+  // in-memory default (0) would flash the dialog at users who already
+  // accepted. Shown ahead of everything, the PIN welcome included.
+  const needsTerms = bootstrapped && (termsAcceptedVersion ?? 0) < TERMS_VERSION;
+
   return (
     <div className={`flex flex-col h-full w-full bg-gradient theme-${theme}`}>
       <UpdateBanner />
@@ -60,8 +70,16 @@ export default function App() {
         {view === "preferences" && <Preferences onClose={() => setView("home")} />}
       </main>
 
-      {showWelcomePin && <WelcomePinDialog />}
+      {!needsTerms && showWelcomePin && <WelcomePinDialog />}
       {playback && <Player />}
+
+      {needsTerms && (
+        <TermsDialog
+          mode="accept"
+          onAccept={() => updateSettings({ termsAcceptedVersion: TERMS_VERSION })}
+        />
+      )}
+      {!needsTerms && <CrashNotice />}
 
       {/* Mobile UX: covers the UI with a "rotate to landscape" prompt while
           the device is held in portrait. Auto-dismisses on rotation. */}

@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   showEpg: false,
   hasOnboarded: false,
   videoBrightness: 1,
+  termsAcceptedVersion: 0,
 };
 
 export async function loadSources(): Promise<Source[]> {

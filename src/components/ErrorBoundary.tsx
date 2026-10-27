@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { logToFile } from "../lib/diagnostics";
 
 // Defensive boundary used to wrap heavy/risky subtrees (e.g. the virtualised
 // catalog grid). React's default behaviour for an uncaught render error is
@@ -25,9 +26,13 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // Log so the user can paste the stack trace if they ever need to.
-    // Avoid noisy console.error to not look like an unhandled crash.
     console.warn("[ErrorBoundary] caught render error:", error, info.componentStack);
+    // Into the log file too: the console is invisible in a release build,
+    // so this is the only way a render crash a user hit ever reaches us.
+    logToFile(
+      "error",
+      `render error: ${error.message}\n${error.stack ?? ""}\ncomponent stack:${info.componentStack ?? ""}`,
+    );
   }
 
   reset = () => {

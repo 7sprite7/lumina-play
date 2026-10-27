@@ -150,6 +150,26 @@ export function hideViewport(): Promise<void> {
   return invoke<void>("hide_viewport");
 }
 
+// ---------- mouse over the video ----------
+//
+// The mpv surface is a separate top-level window above the WebView, so
+// mouse events over the video never reach React directly. The plugin
+// captures them in that window and forwards them as events.
+
+export type NativeInput = "move" | "click" | "dblclick" | "wheel-up" | "wheel-down";
+
+/** Subscribes to mouse input over the video; returns the unsubscribe. */
+export async function onNativeInput(cb: (kind: NativeInput) => void): Promise<() => void> {
+  if (!hasNativeMpv) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<NativeInput>("lumina-mpv://input", (e) => cb(e.payload));
+}
+
+/** Hides the cursor over the video, in step with the auto-hiding controls. */
+export function setCursorHidden(hidden: boolean): Promise<void> {
+  return invoke<void>("set_cursor_hidden", { hidden });
+}
+
 export function raiseViewport(): Promise<void> {
   return invoke<void>("raise_viewport");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "lumina-play"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lumina Play — modern IPTV player"
 authors = ["Jer"]
 edition = "2021"
@@ -20,9 +20,24 @@ tauri-plugin-http = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-env_logger = "0.11"
+log = "0.4"
+regex = "1"
+# local-offset: log timestamps in the user's local time, so "it froze
+# around 21:30" can be matched to the log.
+time = { version = "0.3", features = ["local-offset"] }
+# Diagnostics export (logs + minidumps into one file on the Desktop).
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # Windows-only: native libmpv engine. Branch desktop/native-player; see
 # tauri-plugin-lumina-mpv/README.md for scope and milestones.
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-plugin-lumina-mpv = { path = "./tauri-plugin-lumina-mpv" }
+# Native crash handler: SetUnhandledExceptionFilter + MiniDumpWriteDump.
+# Same version as the mpv plugin's, so it compiles once.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+    "Win32_System_Kernel",
+    "Win32_Storage_FileSystem",
+] }

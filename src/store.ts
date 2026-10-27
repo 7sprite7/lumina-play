@@ -330,6 +330,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     showEpg: false,
     hasOnboarded: false,
     videoBrightness: 1,
+    termsAcceptedVersion: 0,
   },
   adultUnlocked: false,
 

@@ -57,6 +57,10 @@ export interface AppSettings {
   // bypass it. Letting users boost brightness in-app compensates for that
   // without us having to fight the platform.
   videoBrightness: number;
+  // Version of the terms of use the user accepted; 0 = never. Stored as a
+  // version rather than a boolean so a change to the terms can require
+  // a fresh acceptance (see TERMS_VERSION in lib/terms.ts).
+  termsAcceptedVersion: number;
 }
 
 export interface Movie {

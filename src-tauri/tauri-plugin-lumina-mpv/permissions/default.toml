@@ -12,6 +12,7 @@ permissions = [
     "allow-set-volume",
     "allow-set-mute",
     "allow-set-brightness",
+    "allow-set-cursor-hidden",
     "allow-set-viewport",
     "allow-hide-viewport",
     "allow-raise-viewport",

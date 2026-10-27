@@ -415,6 +415,18 @@
           "markdownDescription": "Denies the set_brightness command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_cursor_hidden command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-cursor-hidden",
+          "markdownDescription": "Enables the set_cursor_hidden command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_cursor_hidden command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-cursor-hidden",
+          "markdownDescription": "Denies the set_cursor_hidden command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_mute command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-mute",
@@ -487,10 +499,10 @@
           "markdownDescription": "Denies the stop command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the Lúmina Play MPV plugin — grants every command the plugin exposes. Scope narrowing is unnecessary here because the plugin only runs inside the app's own windows.\n#### This default permission set includes:\n\n- `allow-play`\n- `allow-pause`\n- `allow-resume`\n- `allow-stop`\n- `allow-seek`\n- `allow-set-speed`\n- `allow-set-volume`\n- `allow-set-mute`\n- `allow-set-brightness`\n- `allow-set-viewport`\n- `allow-hide-viewport`\n- `allow-raise-viewport`\n- `allow-get-tracks`\n- `allow-set-audio-track`\n- `allow-set-subtitle-track`\n- `allow-get-state`",
+          "description": "Default permissions for the Lúmina Play MPV plugin — grants every command the plugin exposes. Scope narrowing is unnecessary here because the plugin only runs inside the app's own windows.\n#### This default permission set includes:\n\n- `allow-play`\n- `allow-pause`\n- `allow-resume`\n- `allow-stop`\n- `allow-seek`\n- `allow-set-speed`\n- `allow-set-volume`\n- `allow-set-mute`\n- `allow-set-brightness`\n- `allow-set-cursor-hidden`\n- `allow-set-viewport`\n- `allow-hide-viewport`\n- `allow-raise-viewport`\n- `allow-get-tracks`\n- `allow-set-audio-track`\n- `allow-set-subtitle-track`\n- `allow-get-state`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the Lúmina Play MPV plugin — grants every command the plugin exposes. Scope narrowing is unnecessary here because the plugin only runs inside the app's own windows.\n#### This default permission set includes:\n\n- `allow-play`\n- `allow-pause`\n- `allow-resume`\n- `allow-stop`\n- `allow-seek`\n- `allow-set-speed`\n- `allow-set-volume`\n- `allow-set-mute`\n- `allow-set-brightness`\n- `allow-set-viewport`\n- `allow-hide-viewport`\n- `allow-raise-viewport`\n- `allow-get-tracks`\n- `allow-set-audio-track`\n- `allow-set-subtitle-track`\n- `allow-get-state`"
+          "markdownDescription": "Default permissions for the Lúmina Play MPV plugin — grants every command the plugin exposes. Scope narrowing is unnecessary here because the plugin only runs inside the app's own windows.\n#### This default permission set includes:\n\n- `allow-play`\n- `allow-pause`\n- `allow-resume`\n- `allow-stop`\n- `allow-seek`\n- `allow-set-speed`\n- `allow-set-volume`\n- `allow-set-mute`\n- `allow-set-brightness`\n- `allow-set-cursor-hidden`\n- `allow-set-viewport`\n- `allow-hide-viewport`\n- `allow-raise-viewport`\n- `allow-get-tracks`\n- `allow-set-audio-track`\n- `allow-set-subtitle-track`\n- `allow-get-state`"
         }
       ]
     }

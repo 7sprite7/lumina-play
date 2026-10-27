@@ -295,7 +295,19 @@ function VirtualGrid({ items, minCardWidth, aspectClass, onItemClick }: VirtualG
   return (
     <VirtuosoGrid
       className="flex-1"
-      style={{ height: "100%" }}
+      style={{
+        height: "100%",
+        // Always reserve the scrollbar's space. The column count comes
+        // from `auto-fill, minmax(...)`, i.e. from the available width —
+        // and a scrollbar appearing steals ~10px of it. Near a column
+        // boundary that flips the column count, which changes the total
+        // height, which removes the scrollbar, which adds the column
+        // back… VirtuosoGrid re-measures synchronously on every flip,
+        // and the diagnostics log caught it ending in "Maximum call stack
+        // size exceeded" inside react-virtuoso — the kind of loop that
+        // freezes the UI. A stable gutter takes the width out of the loop.
+        scrollbarGutter: "stable",
+      }}
       totalCount={items.length}
       overscan={600}
       increaseViewportBy={{ top: 300, bottom: 600 }}
